@@ -19,7 +19,7 @@ function m.candidates(routes, physics, placement, ranger, team, snapshot, los)
         local step = math.max(4, r.length / math.max(8, math.floor(36 / routeCount)))
         for d = 0, r.length, step do
             local p = physics.at(r,d)
-            for _, radius in ipairs({3.5, 6, 8.5}) do
+            for _, radius in ipairs({3, 5.5, 8, 10.5}) do
                 for i = 0, 7 do
                     local angle = i * math.pi / 4
                     local x = math.round((p.X + radius * math.cos(angle)) / 1.5) * 1.5

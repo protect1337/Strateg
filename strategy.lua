@@ -82,6 +82,7 @@ function m.new(c, routes, los, spots)
                 local shield=g.shield*g.count
                 local extra=g.extra*g.count
                 local demand=hp+shield+extra
+                if g.type=="Plague Doctor" then demand+=9750 end
                 local order={}
                 for i,t in ipairs(towers) do
                     local p=profile(t.pos,t.st.range)[idx]

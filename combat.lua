@@ -19,6 +19,11 @@ function m.run(snapshot, routes, physics, los, action, horizon)
             c.route = r
             c.dist = physics.project(r, physics.vec(e.pathPos))
             c.spawnAt = e.spawnAt or 0
+            if e.type=="Plague Doctor" or e.boss and e.name=="Plague Doctor" then
+                c.plague=true
+                c.healAt=c.spawnAt+(e.bossHealIn or 12)
+                c.maxHp=e.maxHp or 45000
+            end
             table.insert(enemies, c)
         else
             result.unknown += e.hp + (e.shield or 0)
@@ -37,6 +42,13 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 end
             end
             c.wait = math.max(0, t.nextAttack or 0)
+            c.stunUntil=0
+            if t.stunned then
+                for _,b in pairs(t.debuffs or {}) do
+                    if b.type=="Stun" or b.type=="Freeze" then c.stunUntil=math.max(c.stunUntil,b.remaining or b.duration or 0) end
+                end
+                if c.stunUntil==0 then c.stunUntil=1 end
+            end
             c.left = math.clamp((c.burstSize or 1) - (t.burstIndex or 1) + 1, 1, c.burstSize or 1)
             if (t.burstReset or 0) <= 0 then c.left = c.burstSize or 1 end
             c.idle = 0
@@ -93,6 +105,16 @@ function m.run(snapshot, routes, physics, los, action, horizon)
         for _, e in ipairs(enemies) do
             if not e.done and time >= e.spawnAt then
                 e.pos = physics.at(e.route, e.dist)
+                if e.plague then
+                    if time>=e.healAt then
+                        e.hp=math.min(e.maxHp,e.hp+8750)
+                        e.healAt+=30
+                    end
+                    if not e.smokeHealed and e.hp<=7500 then
+                        e.smokeHealed=true
+                        e.hp=math.min(e.maxHp,e.hp+1000)
+                    end
+                end
                 if e.dist >= e.route.length and not e.reverse then
                     e.done = true
                     result.leaks += e.hp
@@ -123,12 +145,13 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 t.wait=math.min(t.wait,0)
             end
             if time > 0 then t.wait -= dt end
-            if t.wait <= 0 and (t.pendingStats or not t.activeAt or time >= t.activeAt) then
+            if t.wait <= 0 and time>=(t.stunUntil or 0) and (t.pendingStats or not t.activeAt or time >= t.activeAt) then
                 local best
                 local progress = -math.huge
                 for _, e in ipairs(enemies) do
                     if not e.done and time >= e.spawnAt and not e.air and not e.untargetable and not e.invulnerable and not e.noDamage and not e.stasis and (not e.stealth or t.stealthDetection) and (e.pos - t.pos).Magnitude <= t.range then
                         local p = e.dist / e.route.length
+                        if t.query==1 then p=-p elseif t.query==2 then p=e.hp+(e.shield or 0) elseif t.query==3 then p=-(e.hp+(e.shield or 0)) end
                         if p > progress and los(t.pos, e.pos) then
                             best = e
                             progress = p

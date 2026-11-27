@@ -6,6 +6,10 @@ function m.new(c)
     local last=-math.huge
     local lastSkip=-math.huge
     local lastScan=-math.huge
+    local lastEmergency=-math.huge
+    local cachedBaseline
+    local baselineWave
+    local valueCache={}
     local queued
     local all=c.ranger.all()
     local base=c.ranger.stats(0,0)
@@ -22,6 +26,7 @@ function m.new(c)
             if #spots==0 then return false end
             search=c.strategy.new(c,routes,los,spots)
             mapKey=key
+            c.tactics.reset(key)
             rollout=nil
             queued=nil
         end
@@ -87,10 +92,13 @@ function m.new(c)
             local r=routes[e.pathIndex]
             if r and not e.reverse then
                 local d=c.physics.project(r,c.physics.vec(e.pathPos))
-                local t=(r.length-d)/math.max(0.01,e.speed or 0)
-                if not e.stopped and not e.stunned and not e.stasis then
-                    list[#list+1]={id=id,e=e,r=r,d=d,eta=t,risk=e.hp/math.max(0.5,t)}
+                local speed=e.speed or 0
+                if speed<=0.01 then
+                    local cfg=c.resources.GetEnemyConfig(e.type)
+                    speed=cfg and cfg.Speed or 1
                 end
+                local t=(r.length-d)/math.max(0.01,speed)
+                list[#list+1]={id=id,e=e,r=r,d=d,speed=speed,eta=t,risk=e.hp/math.max(0.5,t)}
             end
         end
         table.sort(list,function(a,b) return a.risk>b.risk end)
@@ -108,12 +116,12 @@ function m.new(c)
                 if c.placementHandler.Check(p,c.ranger.config,team) then out[#out+1]=p end
             end
         end
-        for i=1,math.min(4,#ts) do
+        for i=1,math.min(2,#ts) do
             local q=ts[i]
-            for _,seconds in ipairs({1,3,6,10}) do
-                local d=math.min(q.r.length-0.1,q.d+math.max(0,q.e.speed)*seconds)
+            for _,seconds in ipairs({0,3,7,13,22}) do
+                local d=math.min(q.r.length-0.1,q.d+q.speed*seconds)
                 local center=c.physics.at(q.r,d)
-                for _,radius in ipairs({3.5,6}) do
+                for _,radius in ipairs({2.5,5.5,8.5}) do
                     for k=0,5 do
                         local a=k*math.pi/3
                         local px=math.round((center.X+radius*math.cos(a))*2)/2
@@ -124,10 +132,34 @@ function m.new(c)
                 end
             end
         end
+        local anchors=0
+        for _,t in pairs(s.towers) do
+            if t.owned and t.type=="Ranger" and anchors<6 then
+                local pos=c.physics.vec(t.pos)
+                local useful=false
+                for i=1,math.min(2,#ts) do
+                    if c.tactics.reach(pos,t.range,ts[i],los,0)>0 then useful=true break end
+                end
+                if useful then
+                    anchors+=1
+                    for k=0,5 do
+                        local a=k*math.pi/3
+                        local px=pos.X+3.1*math.cos(a)
+                        local pz=pos.Z+3.1*math.sin(a)
+                        local y=c.placementHandler.GetGroundHeightAtXZ(px,pz,pos.Y)
+                        if type(y)=="number" then add(Vector3.new(px,y,pz)) end
+                    end
+                end
+            end
+        end
         return out
     end
 
     local function value(st,pos,ts)
+        local k=string.format("%.2f:%.2f:%.2f:%d:%d:%.2f:%.2f",pos.X,pos.Y,pos.Z,st.path1,st.path2,st.range,st.dps)
+        local group=valueCache[ts]
+        if not group then group={} valueCache[ts]=group end
+        if group[k]~=nil then return group[k] end
         local score=0
         for i=1,math.min(8,#ts) do
             local q=ts[i]
@@ -136,13 +168,14 @@ function m.new(c)
                 local dps=st.dps*(st.ignoreResistance and 1 or 1-math.clamp((e.resist or {})[tostring(st.damageType)] or 0,0,1))
                 if st.path2>=4 then dps+=st.path2==5 and 12 or 5 end
                 local time=0
-                for t=0.5,math.min(25,q.eta),0.75 do
-                    local p=c.physics.at(q.r,q.d+(e.speed or 0)*t)
-                    if (p-pos).Magnitude<=st.range and los(pos,p) then time+=0.75 end
+                for t=0.5,math.min(45,q.eta),1 do
+                    local p=c.physics.at(q.r,q.d+q.speed*t)
+                    if (p-pos).Magnitude<=st.range and los(pos,p) then time+=1 end
                 end
                 score+=math.min(e.hp+(e.shield or 0),dps*time)*(1+e.hp/math.max(1,q.eta)*0.1)
             end
         end
+        group[k]=score
         return score
     end
 
@@ -150,11 +183,11 @@ function m.new(c)
         if #ts==0 then return end
         local urgent={}
         for _,q in ipairs(ts) do
-            if q.eta<=35 then urgent[#urgent+1]=q end
+            if q.eta<=45 or q.e.hp>=s.lives and q.eta<=65 then urgent[#urgent+1]=q end
         end
         if #urgent==0 then return end
-        local h=math.min(40,math.max(5,urgent[1].eta+1))
-        for _,q in ipairs(urgent) do h=math.max(h,math.min(40,q.eta+0.5)) end
+        local h=math.min(66,math.max(5,urgent[1].eta+1))
+        for _,q in ipairs(urgent) do h=math.max(h,math.min(66,q.eta+0.5)) end
         local sim=table.clone(s)
         sim.enemies={}
         for id,e in pairs(s.enemies) do
@@ -166,7 +199,7 @@ function m.new(c)
         local loss=baseline.leaks+baseline.unknown
         if loss<=0 then return nil,baseline end
         local lethal=loss>=s.lives
-        if not lethal and loss<math.max(10,s.lives*0.08) then return nil,baseline end
+        if not lethal and loss<math.max(5,s.lives*0.025) then return nil,baseline end
         local budget=s.cash
         local sales={}
         for id,t in pairs(s.towers) do
@@ -176,7 +209,7 @@ function m.new(c)
             end
         end
         table.sort(sales,function(a,b) return a.value/math.max(1,a.price)<b.value/math.max(1,b.price) end)
-        if lethal then
+        if lethal or s.cash<250 then
             for i=1,math.min(3,#sales) do budget+=sales[i].price end
         end
         local options={}
@@ -229,7 +262,7 @@ function m.new(c)
             local money=s.cash
             local cap=s.towerCount
             if money<a.price or a.kind=="place" and cap>=(s.towerLimit or 0) then
-                if not lethal then return end
+                if not lethal and s.cash>=250 then return end
                 for _,sale in ipairs(sales) do
                     if sale.id~=a.id and c.executor.available({kind="sell",id=sale.id}) then
                         sold[#sold+1]=sale
@@ -253,10 +286,10 @@ function m.new(c)
             local score=(remaining<s.lives and 1000000 or 0)+gain*100-#sold*30-a.price*0.002
             if not best or score>best.score then best={a=a,sold=sold,r=r,score=score,loss=remaining} end
         end
-        for i=1,math.min(10,#options) do assess(options[i]) end
+        for i=1,math.min(6,#options) do assess(options[i]) end
         if not best then return nil,baseline end
         local a=best.a
-        local goal={kind=a.kind,id=a.id,pos=a.pos and c.physics.pack(a.pos),path1=a.stats.path1,path2=a.stats.path2}
+        local goal={kind=a.kind,id=a.id,pos=a.pos and c.physics.pack(a.pos),path1=a.stats.path1,path2=a.stats.path2,live=true}
         if #best.sold>0 then
             queued=goal
             return {kind="sell",id=best.sold[1].id,reason="emergency_fund",predictedLoss=best.loss},baseline
@@ -271,7 +304,7 @@ function m.new(c)
         return nil,baseline
     end
 
-    local function follow(s,goal)
+    local function follow(s,goal,ts)
         if not goal then return end
         local st=c.ranger.stats(goal.path1,goal.path2)
         local t=goal.id and s.towers[goal.id]
@@ -279,6 +312,10 @@ function m.new(c)
             for _,v in pairs(s.towers) do
                 if v.owned and v.type=="Ranger" and (c.physics.vec(v.pos)-c.physics.vec(goal.pos)).Magnitude<2 then t=v break end
             end
+        end
+        if goal.live then
+            local pos=t and c.physics.vec(t.pos) or goal.pos and c.physics.vec(goal.pos)
+            if not pos or value(st,pos,ts or {})<=0 then return nil,true end
         end
         if t then
             if t.path1>=st.path1 and t.path2>=st.path2 then return nil,true end
@@ -291,7 +328,7 @@ function m.new(c)
         end
     end
 
-    local function spend(s,ts)
+    local function spend(s,ts,liveOnly,extraSpots)
         local wi=math.max(1,s.wave)
         local best,rank
         local function check(a,st,pos,old)
@@ -311,7 +348,8 @@ function m.new(c)
             if st.ignoreResistance and not (old and old.ignoreResistance) then gain+=st.dps*0.8 end
             if st.stealthDetection and not (old and old.stealthDetection) and wi>=6 then gain+=st.dps*1.6 end
             if st.path2>=4 and (not old or old.path2<st.path2) then gain+=8 end
-            local v=(current+future*gain*0.35)/math.max(1,a.price)^0.55
+            if future<=0 or liveOnly and current<=0 then return end
+            local v=(current+(liveOnly and 0 or future*gain*0.35))/math.max(1,a.price)^0.55
             if old then v*=1.6 elseif s.towerCount>=3 then v*=0.35 end
             if not best or v>rank then best,rank=a,v end
         end
@@ -328,12 +366,12 @@ function m.new(c)
         end
         if s.towerCount<(s.towerLimit or 0) and s.cash>=base.cost then
             local n=0
-            for _,item in ipairs(spots) do
+            for _,item in ipairs(extraSpots or spots) do
                 local a={kind="place",pos=item.pos,price=base.cost}
                 if valid(a,s) then
                     check(a,base,item.pos)
                     n+=1
-                    if n>=5 then break end
+                    if n>=(liveOnly and 18 or 5) then break end
                 end
             end
         end
@@ -345,40 +383,102 @@ function m.new(c)
         if s.time-last<0.08 then return end
         last=s.time
         if not prepare(s) then return end
+        valueCache={}
         local ts=threat(s)
-        local rescue,baseline=emergency(s,ts)
+        local rescue,baseline
+        if s.time-lastEmergency>=0.45 or baselineWave~=s.wave then
+            lastEmergency=s.time
+            baselineWave=s.wave
+            rescue,baseline=emergency(s,ts)
+            cachedBaseline=baseline
+        else
+            baseline=cachedBaseline
+        end
+        local targets=c.tactics.target(s,ts,los)
+        local w=c.forecast.wave(s.wave)
+        local final=s.wave==#c.economy.config.Waves and w and s.waveAge and s.waveAge>=w.last+1
+        local liveSpots
+        local function livePositions()
+            if not liveSpots then
+                liveSpots={}
+                for _,p in ipairs(near(s,ts)) do
+                    local v=value(base,p,ts)
+                    if v>0 then liveSpots[#liveSpots+1]={pos=p,rank=v} end
+                end
+                table.sort(liveSpots,function(a,b) return a.rank>b.rank end)
+            end
+            return liveSpots
+        end
         local skip={allowed=false,reason="priority"}
         local a=rescue
         if not a and queued then
             local done
-            a,done=follow(s,queued)
+            a,done=follow(s,queued,ts)
             if done then queued=nil end
         end
-        if not a and rollout then
+        if not a and final then
+            a=c.tactics.recycle(s,ts,los)
+            if not a and not queued then
+                a=c.tactics.rebuild(s,ts,los)
+                if a then queued=a.goal end
+            end
+        end
+        if not a and rollout and not final then
             for _,goal in ipairs(rollout.moves or {}) do
                 if goal.wave<=math.max(1,s.wave+1) then
-                    local v,done=follow(s,goal)
+                    local v,done=follow(s,goal,ts)
                     if v then a=v a.reason="opening_plan" break end
                     if not done and s.cash<250 then break end
                 else break end
             end
         end
-        if not a and (s.cash>=1500 or not next(s.towers) or baseline and baseline.leaks>0) then
-            a=spend(s,ts)
+        if not a and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
+            local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
+            a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
             if a then a.reason="available_power" end
         end
-        if not a and not rescue and (not baseline or baseline.leaks+baseline.unknown<s.lives) and c.executor.canSkip(s) and s.time-lastSkip>=2 then
+        if not a and not rescue and c.executor.canSkip(s) and s.time-lastSkip>=1 then
             lastSkip=s.time
-            skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots)
+            local funded
+            if baseline and baseline.leaks>0 and s.cash+c.economy.bonus(s.wave+1)>=250 then
+                local richer=table.clone(s)
+                richer.cash+=c.economy.bonus(s.wave+1)
+                local v=spend(richer,ts,true,livePositions())
+                if v and v.price>s.cash then
+                    if v.kind=="upgrade" then
+                        local t=s.towers[v.id]
+                        local a1=t.path1+(v.path==1 and (v.levels or 1) or 0)
+                        local a2=t.path2+(v.path==2 and (v.levels or 1) or 0)
+                        funded={kind="upgrade",id=v.id,path=v.path,levels=v.levels,price=v.price,stats=c.ranger.stats(a1,a2)}
+                    elseif v.kind=="place" then
+                        local pos=c.physics.vec(v.pos)
+                        local st=base
+                        local gain=value(st,pos,ts)
+                        for _,candidate in ipairs(all) do
+                            if candidate.cost<=richer.cash then
+                                local g=value(candidate,pos,ts)
+                                if g>gain then st,gain=candidate,g end
+                            end
+                        end
+                        funded={kind="place",pos=pos,price=st.cost,stats=st,buildDelay=0.45+(st.path1>0 and 0.45 or 0)+(st.path2>0 and 0.45 or 0)}
+                    end
+                end
+            end
+            skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,funded)
             if skip.allowed and skip.purchase then
                 local v=skip.purchase
                 if v.kind=="upgrade" and s.towers[v.id] then
                     local t=s.towers[v.id]
-                    queued={id=v.id,path1=t.path1+(v.path==1 and 1 or 0),path2=t.path2+(v.path==2 and 1 or 0)}
-                elseif v.kind=="place" then queued={pos=v.pos,path1=0,path2=0} end
+                    queued={id=v.id,path1=t.path1+(v.path==1 and (v.levels or 1) or 0),path2=t.path2+(v.path==2 and (v.levels or 1) or 0)}
+                elseif v.kind=="place" then queued={pos=v.pos,path1=v.path1 or 0,path2=v.path2 or 0,live=funded~=nil} end
             end
         end
-        return {wave=s.wave,revision=s.revision,baseline=baseline,recommendation=a or {kind="hold",reason="no_affordable_useful_action",cash=s.cash},skip=skip,mode="auto",emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives}
+        local top={}
+        for i=1,math.min(3,#ts) do
+            local q=ts[i]
+            top[i]={id=q.id,type=q.e.type,hp=q.e.hp,eta=q.eta,etaReal=q.eta/math.max(0.01,s.speed or 1),dist=q.d,boss=q.e.boss}
+        end
+        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason="no_affordable_useful_action",cash=s.cash},skip=skip,mode="auto",targets=targets,emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives}
     end
     return x
 end

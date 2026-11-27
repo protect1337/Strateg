@@ -12,6 +12,17 @@ function m.new(common, reader, ctx, log)
     local upgrade = net.GetEvent("TowerUpgradeRequest")
     local sell = net.GetEvent("SellTower")
     local vote = net.GetEvent("SkipWaveVoteCast")
+    local query = net.GetEvent("ChangeQueryType")
+    local queryAcks={}
+    local queryPending={}
+    local queryTime={}
+    local nu=require(common.NetworkingUtilities)
+    net.GetEvent("TowerQueryTypeIndexChanged"):AttachCallback(function(data)
+        for _,v in pairs(data) do
+            local hash,index=nu.DecompressDoubleHash(v)
+            queryAcks[hash]=index
+        end
+    end)
     local canVote = false
     local pending
     local nextAt = 0
@@ -53,6 +64,23 @@ function m.new(common, reader, ctx, log)
     end
 
     function x.ready(s)
+        for id,p in pairs(queryPending) do
+            local t=s and s.towers[id]
+            if queryAcks[p.hash]==p.action.query then
+                local obj=tower(id)
+                if obj then obj:SetQueryTypeIndex(p.action.query) end
+                report(p.action,"confirmed","server_query_update")
+                queryPending[id]=nil
+            elseif t and p.action.target and t.target==p.action.target and t.target~=p.prior then
+                local obj=tower(id)
+                if obj then obj:SetQueryTypeIndex(p.action.query) end
+                report(p.action,"observed","target_changed")
+                queryPending[id]=nil
+            elseif os.clock()>=p.deadline then
+                report(p.action,"unconfirmed","query_update_missing")
+                queryPending[id]=nil
+            end
+        end
         if not allowed(s) then
             pending = nil
             return false
@@ -91,6 +119,21 @@ function m.new(common, reader, ctx, log)
 
     function x.canSkip(s)
         return canVote and votedWave ~= s.wave
+    end
+
+    function x.target(a,s)
+        if not allowed(s) or not a or queryPending[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<2 then return false end
+        local t=tower(a.id)
+        if not t or t.CustomQueryOptions or type(a.query)~="number" or a.query%1~=0 or a.query<0 or a.query>3 or t.QueryTypeIndex==a.query then return false end
+        local ok=pcall(function()
+            queryAcks[t.Hash]=nil
+            query:FireServer(t.Hash,a.query)
+        end)
+        if not ok then return false end
+        queryTime[a.id]=os.clock()
+        queryPending[a.id]={hash=t.Hash,action=a,prior=s.towers[a.id] and s.towers[a.id].target,deadline=os.clock()+0.8}
+        report(a,"sent")
+        return true
     end
 
     function x.run(a)

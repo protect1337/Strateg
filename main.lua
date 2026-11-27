@@ -28,6 +28,7 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
+    ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
     ctx.executor = executor
@@ -53,6 +54,7 @@ local ok, err = xpcall(function()
     end)
     local elapsed = 0
     local prev
+    local lastDebug=-math.huge
     local lastError
     local busy = false
     local worker = false
@@ -78,8 +80,10 @@ local ok, err = xpcall(function()
             local snap = reader.read()
             if not snap then return end
             snap = state.publish(snap)
-            log.observe(prev, snap)
-            prev = snap
+            if not prev or snap.time-prev.time>=0.2 or snap.wave~=prev.wave or snap.phase~=prev.phase or snap.outcome then
+                log.observe(prev, snap)
+                prev = snap
+            end
             if snap.outcome then
                 stopped = true
                 connection:Disconnect()
@@ -155,13 +159,17 @@ local ok, err = xpcall(function()
             task.spawn(function()
                 local success, problem = xpcall(function()
                     if not executor.ready(snap) then return end
+                    local began=os.clock()
                     local plan = planner.plan(snap)
                     if not plan then return end
-                    if not plan.emergency and not plan.skip.allowed and plan.recommendation.kind=="hold" then
-                        for _, a in ipairs(ctx.ability.rank(snap, ctx.physics)) do
-                            if executor.available(a) and executor.run(a) then return end
-                        end
+                    if snap.time-lastDebug>=1 then
+                        lastDebug=snap.time
+                        local a=plan.recommendation
+                        local b=plan.baseline
+                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,computeMs=math.floor((os.clock()-began)*1000),targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount})
                     end
+
+
                     log.record("decisions", plan)
                     log.record("skip", {wave=plan.wave,revision=plan.revision,vote=executor.canSkip(snap),result=plan.skip})
                     if plan.future then log.record("forecast", {wave = plan.wave, revision = plan.revision, future = plan.future, recommendation = plan.recommendation, goal = plan.goal, rollout = plan.rollout}) end
@@ -170,10 +178,17 @@ local ok, err = xpcall(function()
                         log.record("decisions", {event="stale_plan",wave=snap.wave,revision=snap.revision,age=now and now.time-snap.time})
                         return
                     end
+                    if plan.targets then
+                        local n=0
+                        for _,a in ipairs(plan.targets) do
+                            if executor.target(a,now) then n+=1 end
+                            if n>=3 then break end
+                        end
+                    end
                     if plan.skip.allowed and executor.run({kind = "skip", wave = snap.wave, threat = plan.skip.threat, lives = plan.skip.lives}) then return end
                     if executor.run(plan.recommendation) then return end
-                    if plan.emergency then
-                        for _, a in ipairs(ctx.ability.rank(snap, ctx.physics)) do
+                    if plan.emergency or plan.recommendation.kind=="hold" then
+                        for _, a in ipairs(ctx.ability.rank(now, ctx.physics)) do
                             if executor.available(a) and executor.run(a) then return end
                         end
                     end

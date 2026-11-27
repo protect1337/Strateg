@@ -36,6 +36,20 @@ function m.new()
     local lastTime
     local timer
     local timerAt
+    local gameClock=0
+    local clockAt=os.clock()
+    local buffTimes={}
+    local bossUses={}
+    local net=require(common.NetworkingHandler)
+    net.GetEvent("EnemyUsedAbility"):AttachCallback(function(data)
+        local e=ec.GetEnemy(data[1])
+        local a=data[2]
+        if e and a and (e.Type=="Plague Doctor" or e.DisplayName=="Plague Doctor") then
+            local id=tostring(e.UniqueId)
+            bossUses[id]=bossUses[id] or {}
+            bossUses[id][a[1]]=gameClock
+        end
+    end)
     local bind = require(common.BindableHandler)
     bind.GetEvent("WaveChanged"):AttachCallback(function(n, rewind, started)
         if started and not rewind then
@@ -67,6 +81,10 @@ function m.new()
         if not lives and not voting then return end
         lives = lives or {Lives = 500, TotalLives = 500}
 
+        local now=os.clock()
+        local speed=g:GetFinalSpeedMultiplier() or 1
+        gameClock+=math.max(0,now-clockAt)*speed
+        clockAt=now
         local s = {
             time = os.clock(),
             map = g.MapName,
@@ -147,7 +165,10 @@ function m.new()
                     resistModifier = e.DamageResistanceModifier,
                     allReduction = e.AllDamageReduction,
                     maxDamage = e.MaximumDamage,
-                    burn = nums(e.BurnHandler.VFXNameToBurnTimeLeftMap)
+                    burn = nums(e.BurnHandler.VFXNameToBurnTimeLeftMap),
+                    boss=e.Type=="Plague Doctor" or e.DisplayName=="Plague Doctor",
+                    bossHealIn=bossUses[id] and bossUses[id].PlagueDoctorStun and math.max(0,30-(gameClock-bossUses[id].PlagueDoctorStun)) or nil,
+                    smokeHealed=bossUses[id] and bossUses[id].PlagueDoctorSmokeHeal~=nil or false
                 }
             end
         end
@@ -159,6 +180,17 @@ function m.new()
                 local ls = l:GetLevelStats()
                 local id = tostring(t.UniqueId)
                 local ab = {}
+                local debuffs={}
+                local buffs=t.BuffHandler:GetStatMultipliers()
+                local active={}
+                local previous=buffTimes[id] or {}
+                for hash,b in pairs(t.BuffHandler.ActiveBuffs or {}) do
+                    if b.IsDebuff then
+                        active[hash]=previous[hash] or gameClock
+                        debuffs[b.Name]={duration=b.Config.Time,remaining=math.max(0,(b.Config.Time or 0)-(gameClock-active[hash])),amount=b.Amount,type=b.Type}
+                    end
+                end
+                buffTimes[id]=active
                 for name, a in pairs(t.AbilityHandler.Abilities) do
                     ab[name] = {
                         cooldown = a:GetCooldownRemaining(),
@@ -180,7 +212,13 @@ function m.new()
                     range = t:GetCurrentRange(),
                     radius = t.Radius,
                     reload = t:GetCurrentReloadTime(),
-                    damage = ls.Damage * (1 + (t.BuffHandler:GetStatMultipliers().DamageMultiplier or 0)),
+                    damage = ls.Damage * (1 + (buffs.DamageMultiplier or 0)),
+                    query=t.QueryTypeIndex,
+                    debuffs=debuffs,
+                    stunned=buffs.Stunned,
+                    rangeMultiplier=buffs.RangeMultiplier,
+                    fireMultiplier=buffs.FirerateMultiplier,
+                    buffDamageMultiplier=buffs.DamageMultiplier,
                     attackDisabled = t.AttackDisabled,
                     damageMultiplier = t.DamageMultiplier,
                     damageType = ls.DamageType,

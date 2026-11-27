@@ -1,6 +1,6 @@
 local m = {}
 
-function m.assess(s,c,routes,los,elapsed,spots)
+function m.assess(s,c,routes,los,elapsed,spots,funded)
     local wi=s.wave
     local nextWave=c.forecast.wave(wi+1)
     local current=c.forecast.wave(wi)
@@ -44,6 +44,7 @@ function m.assess(s,c,routes,los,elapsed,spots)
             consider({kind="place",pos=p,stats=st,price=st.cost},st,p)
         end
     end
+    if funded and funded.price<=s.cash+bonus then best=funded end
     local threat=0
     for _,e in pairs(s.enemies) do threat+=e.hp+(e.shield or 0) end
     local reserve=math.max(20,s.lives*0.20)
@@ -62,8 +63,9 @@ function m.assess(s,c,routes,los,elapsed,spots)
         if best then
             a=table.clone(best)
             b=table.clone(best)
-            a.at=1.5*speed
-            b.at=best.price<=s.cash and 1.5*speed or delay+1.5*speed
+            local build=(1.5+(best.buildDelay or 0))*speed
+            a.at=build
+            b.at=best.price<=s.cash and build or delay+build
         end
         local fast=c.combat.run(now,routes,c.physics,los,a,horizon)
         local slow=c.combat.run(later,routes,c.physics,los,b,horizon)
@@ -76,9 +78,10 @@ function m.assess(s,c,routes,los,elapsed,spots)
     end
     local saved=waitTime-winTime
     local allowed=worstLoss<s.lives-reserve and (saved>0.8 or worstLoss+5<waitLoss) and worstLoss<=waitLoss+math.max(15,s.lives*0.12)
+    if funded and waitLoss>=s.lives and worstLoss<s.lives then allowed=true end
     local buy
     if best then
-        buy={kind=best.kind,id=best.id,path=best.path,price=best.price,pos=best.pos and c.physics.pack(best.pos)}
+        buy={kind=best.kind,id=best.id,path=best.path,levels=best.levels,path1=best.stats.path1,path2=best.stats.path2,price=best.price,pos=best.pos and c.physics.pack(best.pos)}
     end
     return {allowed=allowed,reason=allowed and "economic_skip" or "risk_or_no_gain",predictedLoss=worstLoss,waitLoss=waitLoss,saved=saved,savedReal=saved/speed,delay=delay,bonus=bonus,purchase=buy,threat=threat,lives=s.lives,horizon=horizon}
 end
