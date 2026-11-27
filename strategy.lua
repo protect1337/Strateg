@@ -1,4 +1,4 @@
-local m={version="adaptive-v4"}
+local m={version="adaptive-v5"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -71,6 +71,8 @@ function m.new(c,routes,los,spots)
         {core=2,upper=true,expand=5,siteMode=2},{core=3,upper=false,expand=5,siteMode=3}
     }
     local dt=0.15
+    local earlyLimit=cfg.StartingLives*0.10
+    local stressEarlyLimit=cfg.StartingLives*0.15
     local function settings(policy,wi)
         local a=policy
         for _,patch in ipairs(policy.repairs or {}) do
@@ -80,7 +82,7 @@ function m.new(c,routes,los,spots)
     end
     local function simulate(s,idx,policy,stress,replay,notify)
         local r=routes[idx]
-        local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},time=0,loss=0,earlyLoss=0}
+        local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},time=0,loss=0,earlyLoss=0,spent=0,income=0,bonuses=0}
         local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 40
         local cursor=1
         local serial=0
@@ -146,6 +148,7 @@ function m.new(c,routes,los,spots)
         local function install(pos,upper)
             if not pos or not free(pos) or z.cash<base.cost or #z.towers>=cap then return false end
             z.cash-=base.cost
+            z.spent+=base.cost
             local t={pos=pos,st=base,upper=upper,wait=0,left=base.burstSize,grenade=0,active=z.time+0.45}
             z.towers[#z.towers+1]=t
             return t,base.cost
@@ -155,6 +158,7 @@ function m.new(c,routes,los,spots)
             if cost<=0 or cost>z.cash then return false end
             if st.path1<t.st.path1 or st.path2<t.st.path2 then return false end
             z.cash-=cost
+            z.spent+=cost
             t.st=st
             t.left=st.burstSize
             t.active=z.time+0.3
@@ -294,7 +298,9 @@ function m.new(c,routes,los,spots)
             if not e.noCash then
                 local paid=math.min(e.cashLeft or 0,hp)
                 e.cashLeft=math.max(0,(e.cashLeft or 0)-paid)
-                z.cash+=c.economy.income(wi,paid)*(stress and 0.95 or 1)
+                local earned=c.economy.income(wi,paid)*(stress and 0.95 or 1)
+                z.cash+=earned
+                z.income+=earned
             end
             if e.hp<=0.0001 then
                 e.dead=true
@@ -306,11 +312,13 @@ function m.new(c,routes,los,spots)
             if s.cancel and s.cancel() then return end
             local w=c.forecast.wave(wi)
             unknown+=w.unknown or 0
-            if wi==1 then z.cash+=stress and 0 or 25 else z.cash+=c.economy.bonus(wi) end
+            local bonus=wi==1 and (stress and 0 or 25) or c.economy.bonus(wi)
+            z.cash+=bonus
+            z.bonuses+=bonus
             local start=z.time
             local event=1
             local lossBefore=z.loss
-            local limit=cfg.Waves[wi].CustomWaveTime or 60
+            local limit=math.max(w.last or 0,cfg.Waves[wi].CustomWaveTime or 60)
             if wi==maxWave then limit=math.max(180,w.last+r.length/0.8+30) end
             local steps=math.ceil(limit/dt)
             for k=0,steps do
@@ -389,12 +397,15 @@ function m.new(c,routes,los,spots)
             end
             local delta=z.loss-lossBefore
             if wi<=5 then z.earlyLoss+=delta end
-            z.history[#z.history+1]={wave=wi,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies}
+            local remainingHP=0
+            for _,e in ipairs(z.enemies) do remainingHP+=e.hp+(e.shield or 0) end
+            z.history[#z.history+1]={wave=wi,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies,remainingHP=remainingHP,income=z.income,spent=z.spent,bonuses=z.bonuses}
             if notify then notify(wi,z) end
             if z.lives<=0 or unknown>0 then break end
         end
         local complete=#z.history==maxWave and #z.enemies==0 and z.lives>0 and unknown==0
-        return {from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1}
+        local ledgerError=z.cash-(cfg.StartingCash+z.income+z.bonuses-z.spent)
+        return {ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1}
     end
     function x.search(s)
         local began=os.clock()
@@ -414,7 +425,7 @@ function m.new(c,routes,los,spots)
         end
         local function weak(v)
             for _,w in ipairs(v.history) do
-                if w.wave<=5 and w.loss>1 then return w.wave end
+                if v.earlyLoss>earlyLimit and w.wave<=5 and w.loss>1 then return w.wave end
             end
             for _,w in ipairs(v.history) do
                 if w.loss>25 then return w.wave end
@@ -422,7 +433,8 @@ function m.new(c,routes,los,spots)
             return math.max(1,v.to)
         end
         local function score(v)
-            return v.to*10000-math.max(0,v.loss)*2-math.max(0,v.earlyLoss-5)*800-(v.complete and 0 or 1000)
+            local eligible=v.complete and v.lives>=150 and v.earlyLoss<=earlyLimit
+            return v.to*10000+(eligible and 1000000 or v.complete and 100000 or 0)-math.max(0,v.loss)*5-math.max(0,v.earlyLoss-earlyLimit)*100-(v.remainingHP or 0)*0.25
         end
         local function retain(v,p,w)
             local item={v=v,p=p,w=w or weak(v),rank=score(v)}
@@ -439,7 +451,9 @@ function m.new(c,routes,los,spots)
             if not v then return false end
             if not failed or score(v)>score(failed) then failed=v end
             local problem=weak(v)
-            if v.complete and v.lives>=150 and v.earlyLoss<=5 then
+            local reason=not v.complete and (v.unknown>0 and "unknown_data" or v.lives<=0 and "defeat" or "enemies_remaining") or v.lives<150 and "low_hp" or v.earlyLoss>earlyLimit and "early_loss" or math.abs(v.ledgerError)>0.01 and "cash_mismatch" or "stress_pending"
+            if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError}) end
+            if reason=="stress_pending" then
                 local ok=true
                 local worst=v.lives
                 local checks={}
@@ -448,9 +462,14 @@ function m.new(c,routes,los,spots)
                     if not test then return false end
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
-                    if not test.complete or test.lives<100 or test.earlyLoss>5 then
+                    local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or test.lives<100 and "low_hp" or test.earlyLoss>stressEarlyLimit and "early_loss" or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or "passed"
+                    if s.progress then s.progress(i,n,test.to,test.lives,"stress result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError}) end
+                    if why~="passed" then
                         ok=false
                         problem=weak(test)
+                        if why=="early_loss" then
+                            for _,h in ipairs(test.history) do if h.wave<=5 and h.loss>0 then problem=h.wave break end end
+                        end
                         break
                     end
                 end
@@ -476,7 +495,7 @@ function m.new(c,routes,los,spots)
             local tested=0
             for i=1,count do
                 if s.cancel and s.cancel() then return end
-                local parent=parents[1+((round+i-2)%math.min(#parents,6))]
+                local parent=parents[1+((round+i-2)%math.min(#parents,i%4==0 and 16 or 6))]
                 local w=i%3==0 and weakestLate(parent.v) or i%3==1 and math.max(1,parent.v.to) or parent.w
                 local back=w>=12 and 1+(i-1)%7 or (i-1)%4
                 local from=math.max(0,w-back)

@@ -3,7 +3,7 @@ local rep = game:GetService("ReplicatedStorage")
 local base = "https://raw.githubusercontent.com/protect1337/Strateg/refs/heads/main/"
 
 local function load(name)
-    local src = game:HttpGet(base .. name .. ".lua?v=adaptive-v4")
+    local src = game:HttpGet(base .. name .. ".lua?v=adaptive-v5")
     return assert(loadstring(src, "@" .. name .. ".lua"))()
 end
 
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v4","stale strategy module")
-    print("[Strateg] adaptive-v4 | unlimited repair search")
+    assert(ctx.strategy.version=="adaptive-v5","stale strategy module")
+    print("[Strateg] adaptive-v5 | unlimited repair search")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -107,7 +107,11 @@ local ok, err = xpcall(function()
                             local plan = planner.preflight(snap, function()
                                 local now = state.get()
                                 return not now or now.map ~= snap.map or not now.voting
-                            end,function(i,n,w,lives,phase)
+                            end,function(i,n,w,lives,phase,detail)
+                                if detail then
+                                    print(string.format("[Strateg] %s | %s | HP %.1f | early loss %.1f | remaining %d (%.1f HP) | unknown %d | cash %.1f | income %.1f | bonus %.1f | spent %.1f | ledger error %.4f",phase,detail.reason,lives,detail.earlyLoss,detail.remaining,detail.remainingHP,detail.unknown,detail.cash,detail.income,detail.bonuses,detail.spent,detail.ledgerError))
+                                    return
+                                end
                                 local pct=math.floor((i-1+w/18)/n*100)
                                 if os.clock()-lastPrint>=0.2 or w==18 or w==1 and string.find(phase,"repair") then
                                     lastPrint=os.clock()
