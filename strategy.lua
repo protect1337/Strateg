@@ -135,13 +135,14 @@ function m.new(c,routes,los,spots)
                 sludge=copyList(cp.sludge)
                 pending=copyList(cp.pending)
                 fires=copyList(cp.fires)
+                danger=cp.danger or 0
                 serial,nextBuy,unknown=cp.serial,cp.nextBuy,cp.unknown
                 hpDamage,shieldDamage,paidDamage,sludgeHits=cp.hpDamage,cp.shieldDamage,cp.paidDamage,cp.sludgeHits
             end
         end
         local function checkpoint(wi)
             if not keep then return end
-            checkpoints[wi]={z=copyState(z),sludge=copyList(sludge),pending=copyList(pending),fires=copyList(fires),serial=serial,nextBuy=nextBuy,unknown=unknown,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
+            checkpoints[wi]={z=copyState(z),sludge=copyList(sludge),pending=copyList(pending),fires=copyList(fires),danger=danger,serial=serial,nextBuy=nextBuy,unknown=unknown,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
         end
         local function add(e,d)
             local a=table.clone(e)
@@ -321,25 +322,32 @@ function m.new(c,routes,los,spots)
                     local v=impact(st,p,q.e,q.d)
                     value+=math.min(q.e.hp+(q.e.shield or 0)+(q.e.extra or 0),v)*q.weight*(0.2+math.min(3,q.ratio))
                 end
-                local norm=0
-                for offset=0,2 do
-                    local w=c.forecast.wave(math.max(1,wi)+offset)
-                    if w then
-                        local weight=1/(1+offset)
-                        local total=0
-                        for _,g in ipairs(w.groups or {}) do
-                            local hp=g.hp+(g.shield or 0)+(g.extra or 0)
-                            local n=g.count or 1
-                            local v=impact(st,p,g,0)
-                            local exposure=p.length/math.max(0.1,g.speed)
-                            local concurrent=math.max(1,n*exposure/math.max(1,(g.last or 0)-(g.first or 0)+exposure))
-                            total+=n*math.min(hp,v/concurrent)
+                local key=wi*100+st.path1*10+st.path2
+                p.future=p.future or {}
+                local cached=p.future[key]
+                if not cached then
+                    local future,norm=0,0
+                    for offset=0,2 do
+                        local w=c.forecast.wave(math.max(1,wi)+offset)
+                        if w then
+                            local weight=1/(1+offset)
+                            local total=0
+                            for _,g in ipairs(w.groups or {}) do
+                                local hp=g.hp+(g.shield or 0)+(g.extra or 0)
+                                local n=g.count or 1
+                                local v=impact(st,p,g,0)
+                                local exposure=p.length/math.max(0.1,g.speed)
+                                local concurrent=math.max(1,n*exposure/math.max(1,(g.last or 0)-(g.first or 0)+exposure))
+                                total+=n*math.min(hp,v/concurrent)
+                            end
+                            future+=weight*total/math.max(1,w.count or #w.events)
+                            norm+=weight
                         end
-                        value+=weight*total/math.max(1,w.count or #w.events)
-                        norm+=weight
                     end
+                    cached={value=future/math.max(1,norm)+st.dps*p.length/math.max(1,r.length)*0.8,norm=math.max(1,norm)}
+                    p.future[key]=cached
                 end
-                return value/math.max(1,norm)+st.dps*p.length/math.max(1,r.length)*0.8
+                return value/cached.norm+cached.value
             end
             local best,affordable
             for _,v in ipairs(z.towers) do
@@ -651,7 +659,7 @@ function m.new(c,routes,los,spots)
             local problem=weak(v)
             local failedStress
             local reason=not v.complete and (v.unknown>0 and "unknown_data" or v.lives<=0 and "defeat" or "enemies_remaining") or math.abs(v.ledgerError)>0.01 and "cash_mismatch" or "victory"
-            if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError,attempt=attempts,wave=v.to,reusedWaves=v.reusedWaves,bossHP=v.bossHP,lastLeak=v.lastLeak}) end
+            if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError,attempt=attempts,wave=v.to,reusedWaves=v.reusedWaves,bossHP=v.bossHP,lastLeak=v.lastLeak,towers=v.history[#v.history] and v.history[#v.history].towers or 0,maxed=v.history[#v.history] and v.history[#v.history].maxed or 0,time=v.time}) end
             if reason=="victory" then
                 local ok=true
                 local worst=v.lives
@@ -678,7 +686,7 @@ function m.new(c,routes,los,spots)
                     v.routeLives=worst
                     v.checks=checks
                     if not firstWinAt then firstWinAt=os.clock() firstWinAttempt=attempts end
-                    local rank=(cfg.StartingLives-worst)*10000+v.time+#v.moves*0.01
+                    local rank=math.max(0,cfg.StartingLives-worst)*10000+v.time+#v.moves*0.01
                     v.selectionScore=rank
                     if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then best=v end
                 end

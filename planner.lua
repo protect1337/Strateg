@@ -397,7 +397,7 @@ function m.new(c)
                 end
             end
         end
-        if s.towerCount<(s.towerLimit or 0) and s.cash>=base.cost then
+        if not best and s.towerCount<(s.towerLimit or 0) and s.cash>=base.cost then
             local n=0
             for _,item in ipairs(extraSpots or spots) do
                 local a={kind="place",pos=item.pos,price=base.cost}
@@ -485,14 +485,14 @@ function m.new(c)
         end
         local skip={allowed=false,reason=s.wave<1 and "setup" or "priority"}
         local a=rescue or queuedAction or plannedAction
-        if not a and final and not queued then
+        if not a and final and not planned and not queued then
             a=c.tactics.recycle(s,ts,los)
             if not a then
                 a=c.tactics.rebuild(s,ts,los)
                 if a then queued=a.goal end
             end
         end
-        if not a and (not planned or final) and (final or s.wave>=1) and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
+        if not a and not planned and (final or s.wave>=1) and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
             local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
             a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
             if a then a.reason="available_power" end
