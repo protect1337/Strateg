@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/747ef9631944755ef2e4452dd077a66fe2d48085/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/7c474ef05315c8b545c69df97cc889c348e85c50/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v10","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v10 | victory search")
+    assert(ctx.strategy.version=="adaptive-v11","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v11 | victory search")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -111,6 +111,7 @@ local ok, err = xpcall(function()
                                 if detail then
                                     print(string.format("[Strateg] %s | %s | HP %.1f | early loss %.1f | remaining %d (%.1f HP) | unknown %d | cash %.1f | income %.1f | bonus %.1f | spent %.1f | ledger error %.4f",phase,detail.reason,lives,detail.earlyLoss,detail.remaining,detail.remainingHP,detail.unknown,detail.cash,detail.income,detail.bonuses,detail.spent,detail.ledgerError))
                                     if detail.attempt then
+                                        if detail.time then print(string.format("[Strateg] game %.1fs | towers %d | tier5 %d",detail.time,detail.towers or 0,detail.maxed or 0)) end
                                         local leak=detail.lastLeak
                                         print(string.format("[Strateg] attempt %d | end wave %d | reused %d | boss HP %.1f | last leak %s %.1f",detail.attempt,detail.wave,detail.reusedWaves or 0,detail.bossHP or 0,leak and tostring(leak.type) or "-",leak and leak.hp or 0))
                                     end
