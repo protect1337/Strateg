@@ -419,7 +419,7 @@ function m.new(c)
         last=s.time
         if not prepare(s) then return end
         if not rollout then return {wave=s.wave,revision=s.revision,recommendation={kind="hold",reason="no_validated_plan"},skip={allowed=false,reason="no_validated_plan"},mode="auto"} end
-        if skipContinuation and s.wave>skipContinuation.wave then
+        if skipContinuation and s.wave>skipContinuation.wave and c.executor.skipConfirmed(skipContinuation.wave) then
             local plan=skipContinuation.plan
             local moves={}
             for _,v in ipairs(plan.moves) do if v.wave>=s.wave then moves[#moves+1]=v end end
@@ -430,7 +430,7 @@ function m.new(c)
             cursor=1
             queued=nil
             skipContinuation=nil
-        elseif skipContinuation and s.time-skipContinuation.at>5 then skipContinuation=nil end
+        elseif skipContinuation and (s.wave>skipContinuation.wave or s.time-skipContinuation.at>5) then skipContinuation=nil end
         valueCache={}
         local ts=threat(s)
         local w=c.forecast.wave(s.wave)
@@ -511,7 +511,7 @@ function m.new(c)
             a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
             if a then a.reason="available_power" end
         end
-        if s.wave>=1 and not rescue and not queued and w and s.waveAge and c.executor.canSkip(s) and s.time-lastSkip>=3 and (not a or a.kind=="hold") then
+        if s.wave>=1 and not rescue and not queued and w and s.waveAge and c.executor.canSkip(s) and s.time-lastSkip>=3 and (not a or a.kind=="hold" or rollout.skips and rollout.skips[s.wave] and s.waveAge>=rollout.skips[s.wave]) then
             lastSkip=s.time
             skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,nil,search,rollout)
             if skip.allowed and skip.plan then

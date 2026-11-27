@@ -27,6 +27,7 @@ function m.new(common, reader, ctx, log)
     local pending
     local nextAt = 0
     local votedWave
+    local confirmedSkipWave
     local blocked = {}
     local x = {}
 
@@ -108,6 +109,7 @@ function m.new(common, reader, ctx, log)
             end
             if confirmed then
                 report(a, "confirmed")
+                if a.kind=="skip" then confirmedSkipWave=pending.wave end
                 pending = nil
             elseif os.clock() >= pending.deadline then
                 report(a, "failed", "confirmation_timeout")
@@ -116,6 +118,8 @@ function m.new(common, reader, ctx, log)
         end
         return not pending and os.clock() >= nextAt
     end
+
+    function x.skipConfirmed(wi) return confirmedSkipWave==wi end
 
     function x.canSkip(s)
         return canVote and votedWave ~= s.wave

@@ -73,7 +73,7 @@ function m.new(c,routes,los,spots)
     local bossDataOK=#summon1==15 and #summon2==14
     local policies={}
     for i=1,24 do
-        policies[i]={core=1+(i-1)%3,upper=i%4~=0,mix=i%4==0 or i%5==0,crossEarly=i%3==0,depth=16+(i%6)*12,longRange=0.35+(i%4)*0.18,seed=i*31,risk=0.7+(i%5)*0.14,fast=i%3~=0,skipDelay=({0,2,5,10,20,35})[(i-1)%6+1],placeBias=0.65+(i%5)*0.25,focus=1+(i%4)*0.25}
+        policies[i]={core=1+(i-1)%3,upper=i%4~=0,mix=i%4==0 or i%5==0,crossEarly=i%3==0,depth=16+(i%6)*12,longRange=0.35+(i%4)*0.18,seed=i*31,risk=0.7+(i%5)*0.14,fast=i%3~=0,earlySkip=i%4==0,skipDelay=({0,2,5,10,20,35})[(i-1)%6+1],placeBias=0.65+(i%5)*0.25,focus=1+(i%4)*0.25}
     end
     local dt=0.05
     local earlyLimit=cfg.StartingLives*0.10
@@ -508,7 +508,7 @@ function m.new(c,routes,los,spots)
                 end
                 while event<=#w.events and w.events[event].at<=age+1e-6 do add(w.events[event].enemy,0) event+=1 end
                 if z.time+1e-6>=nextBuy then
-                    purchase(wi,age)
+                    if not (currentLive and live.freezePurchases) then purchase(wi,age) end
                     nextBuy=z.time+0.45
                 end
                 for j=#fires,1,-1 do
@@ -624,12 +624,12 @@ function m.new(c,routes,los,spots)
                 elseif wi<maxWave and opt.fast and not cfg.Waves[wi].SkipWaveDisabled then
                     local override=policy.skipAges and policy.skipAges[wi]
                     if override~=nil then target=override>=0 and override or nil
-                    else target=math.max(15,(w.last or 0)+0.5)+(opt.skipDelay or 0) end
+                    else target=math.max(15,(opt.earlySkip and 15 or (w.last or 0)+0.5))+(opt.skipDelay or 0) end
                 end
                 if wi<maxWave and target and age+1e-6>=target and age<limit-dt then
                     skipped=true
                     z.skips[wi]=age
-                    if not (currentLive and live.cancelUnspawned) then
+                    if not (currentLive and live.cancelUnspawned or policy.cancelEarly) then
                         while event<=#w.events do
                             local v=w.events[event]
                             pending[#pending+1]={e=v.enemy,d=0,at=start+v.at}
@@ -676,11 +676,11 @@ function m.new(c,routes,los,spots)
         local simState=table.clone(s)
         simState.cancel=function() return os.clock()-started>limit end
         local candidates={}
-        local function evaluate(skipAt,cancelUnspawned)
+        local function evaluate(skipAt,cancelUnspawned,freezePurchases)
             local worst,finish,minimumCash,loss=math.huge,0,math.huge,0
             local chosen
             for idx in pairs(routes) do
-                local v=simulate(simState,idx,policy,false,nil,nil,nil,false,nil,{wave=wi,age=age,delay=delay,skipAt=skipAt,cancelUnspawned=cancelUnspawned,history=rollout.history})
+                local v=simulate(simState,idx,policy,false,nil,nil,nil,false,nil,{wave=wi,age=age,delay=delay,skipAt=skipAt,cancelUnspawned=cancelUnspawned,freezePurchases=freezePurchases,history=rollout.history})
                 if not v then return nil end
                 if not chosen then chosen=v end
                 if not v.complete or math.abs(v.ledgerError)>0.01 then
@@ -696,11 +696,11 @@ function m.new(c,routes,los,spots)
         local wait=evaluate(nil,false)
         if not wait then return {allowed=false,reason="branch_budget",tested=0} end
         local first=age+0.5*(s.speed or 1)
-        local now=evaluate(first,false)
+        local now=evaluate(first,false,true)
         if not now then return {allowed=false,reason="branch_budget",tested=1} end
         local w=c.forecast.wave(wi)
         if now.complete and first<w.last then
-            local cancel=evaluate(first,true)
+            local cancel=evaluate(first,true,true)
             if not cancel then return {allowed=false,reason="branch_budget",tested=2} end
             if not cancel.complete then now.complete=false now.cancelRisk=true
             else
@@ -732,11 +732,13 @@ function m.new(c,routes,los,spots)
                 candidates[#candidates+1]={at=at,complete=v.complete,lives=v.lives,time=v.time,loss=v.loss}
             end
         end
-        local saved=wait.complete and wait.time-now.time or delay
+        local saved=wait.complete and now.complete and wait.time-now.time or nil
         local allowed=now.complete and best==now and (not wait.complete or now.score+0.8<wait.score) and (not wait.complete or now.lives>=wait.lives-0.01)
         local plan=allowed and now.plan or nil
+        local threat=0
+        for _,e in pairs(s.enemies or {}) do threat+=e.hp+(e.shield or 0) end
         now.plan=nil wait.plan=nil
-        return {allowed=allowed,reason=allowed and "full_match_skip" or best and best~=now and "better_wait_or_later" or "unsafe_skip",predictedLoss=now.loss,waitLoss=wait.loss,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1),delay=delay,tested=tested,now=now,wait=wait,alternatives=candidates,bestAt=best and best.at,plan=plan}
+        return {allowed=allowed,reason=allowed and "full_match_skip" or best and best~=now and "better_wait_or_later" or "unsafe_skip",predictedLoss=now.loss,waitLoss=wait.loss,saved=saved,savedReal=saved and saved/math.max(0.01,s.speed or 1),delay=delay,threat=threat,lives=s.lives,tested=tested,now=now,wait=wait,alternatives=candidates,bestAt=best and best.at,plan=plan}
     end
     function x.search(s)
         local began=os.clock()
@@ -810,6 +812,18 @@ function m.new(c,routes,los,spots)
                     worst=math.min(worst,test.lives)
                     local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or test.replayed~=#v.moves and "incomplete_replay" or "passed"
                     if s.progress then s.progress(i,n,test.to,test.lives,"route result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError,blockedMove=test.blockedMove,replayed=test.replayed}) end
+                    if why=="passed" then
+                        local early=false
+                        for wi,at in pairs(v.skips) do if at+1e-6<c.forecast.wave(wi).last then early=true break end end
+                        if early then
+                            local alternative=table.clone(policy)
+                            alternative.cancelEarly=true
+                            local alt=simulate(s,k,alternative,false,v.moves,nil,nil,false,v.skips)
+                            if not alt then return false end
+                            worst=math.min(worst,alt.lives)
+                            if not alt.complete or alt.replayed~=#v.moves or math.abs(alt.ledgerError)>0.01 then why="early_skip_uncertain" test=alt end
+                        end
+                    end
                     if why~="passed" then
                         ok=false
                         failedStress=test
@@ -878,6 +892,7 @@ function m.new(c,routes,los,spots)
                 patch.focus=0.8+(i%5)*0.35
                 patch.risk=0.55+(i%6)*0.16
                 patch.fast=i%4~=0
+                patch.earlySkip=i%5==0
                 patch.skipDelay=({0,2,5,10,20,35})[(i+round)%6+1]
                 patch.placeBias=0.5+(i%6)*0.25
                 if best and i%2==0 then
@@ -887,7 +902,7 @@ function m.new(c,routes,los,spots)
                     local wv=c.forecast.wave(wi)
                     local old=source.skips[wi] or math.max(15,wv.last+0.5)
                     local delta=({-8,-4,-2,2,4,8})[(round+i)%6+1]
-                    p.skipAges[wi]=i%6==0 and -1 or math.max(15,wv.last+0.5,old+delta)
+                    p.skipAges[wi]=i%6==0 and -1 or math.max(15,old+delta)
                 else
                     p.repairs[#p.repairs+1]=patch
                 end
