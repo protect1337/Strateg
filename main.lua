@@ -3,7 +3,7 @@ local rep = game:GetService("ReplicatedStorage")
 local base = "https://raw.githubusercontent.com/protect1337/Strateg/refs/heads/main/"
 
 local function load(name)
-    local src = game:HttpGet(base .. name .. ".lua")
+    local src = game:HttpGet(base .. name .. ".lua?v=adaptive-v4")
     return assert(loadstring(src, "@" .. name .. ".lua"))()
 end
 
@@ -28,6 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
+    assert(ctx.strategy.version=="adaptive-v4","stale strategy module")
+    print("[Strateg] adaptive-v4 | unlimited repair search")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -107,7 +109,7 @@ local ok, err = xpcall(function()
                                 return not now or now.map ~= snap.map or not now.voting
                             end,function(i,n,w,lives,phase)
                                 local pct=math.floor((i-1+w/18)/n*100)
-                                if os.clock()-lastPrint>=0.2 or w==18 then
+                                if os.clock()-lastPrint>=0.2 or w==18 or w==1 and string.find(phase,"repair") then
                                     lastPrint=os.clock()
                                     print(string.format("[Strateg] %s | variant %d/%d | wave %d/18 | search %d%% | HP %.1f",phase,i,n,w,math.min(99,pct),lives))
                                 end
@@ -116,12 +118,12 @@ local ok, err = xpcall(function()
                             if plan and now and now.voting and now.map == snap.map and now.playerCount == 1 then
                                 log.record("forecast",{event="preflight",map=snap.map,rollout=plan})
                                 if not plan.ready or plan.to~=#ctx.economy.config.Waves then
-                                    rejectedMap=snap.map
-                                    print(string.format("[Strateg] NOT READY | no validated victory | reached %d/18 | HP %.1f",plan.to,plan.lives or 0))
+                                    retryScanAt=os.clock()+0.5
+                                    print(string.format("[Strateg] retrying | reached %d/18 | HP %.1f",plan.to,plan.lives or 0))
                                     log.record("decisions",{event="preflight_rejected",loss=plan.loss,wave=plan.to})
                                     return
                                 end
-                                print(string.format("[Strateg] READY 100%% | 18/18 | HP %.1f | stress HP %.1f",plan.lives,plan.stressLives))
+                                print(string.format("[Strateg] READY 100%% | 18/18 | HP %.1f | stress HP %.1f | attempts %d",plan.lives,plan.stressLives,plan.attempts or 0))
                                 preflightMap = snap.map
                                 votes = nil
                                 difficultyVote:FireServer(easy)

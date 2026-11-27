@@ -1,4 +1,4 @@
-local m={}
+local m={version="adaptive-v4"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -182,7 +182,51 @@ function m.new(c,routes,los,spots)
             local stealth=false
             for _,v in ipairs(z.towers) do if v.st.stealthDetection then stealth=true break end end
             local pick
-            if #z.towers<need then
+            if opt.late and wi>=12 then
+                local winner,rank
+                local function consider(t,st,pos)
+                    local old=t and t.st
+                    local cost=st.cost-(old and old.cost or 0)
+                    if cost<=0 or cost>z.cash then return end
+                    local coverage=profile(pos,st.range,idx)
+                    local usable=coverage.length
+                    if #z.enemies>0 and wi>=maxWave then
+                        usable=0
+                        for _,e in ipairs(z.enemies) do
+                            if not e.dead and not e.air and (not e.stealth or st.stealthDetection) then
+                                local n=0
+                                for d=math.floor(e.dist+0.5),math.ceil(r.length),3 do
+                                    if coverage.hit[d] then n+=3 end
+                                end
+                                usable+=n*(e.type=="Plague Doctor" and 3 or 1)
+                            end
+                        end
+                    end
+                    if usable<=0 then return end
+                    local power=st.dps+(st.path2>=4 and (st.path2==5 and 10 or 5) or 0)
+                    local prev=old and (old.dps+(old.path2>=4 and (old.path2==5 and 10 or 5) or 0)) or 0
+                    local gain=math.max(0,power-prev)
+                    if st.stealthDetection and not (old and old.stealthDetection) then gain+=power*0.25 end
+                    local v=gain*usable/math.max(1,cost)^0.65
+                    if t then v*=opt.lateWeight or 1 else v*=0.75 end
+                    if not rank or v>rank then winner={t=t,st=st,pos=pos} rank=v end
+                end
+                for _,v in ipairs(z.towers) do
+                    local nextSt=path(v.st,v.upper)
+                    if nextSt then consider(v,nextSt,v.pos) end
+                end
+                if #z.towers<cap and z.cash>=base.cost then
+                    local pos=site(wi)
+                    if pos then consider(nil,base,pos) end
+                end
+                if winner then
+                    if winner.t then t,cost=upgrade(winner.t,winner.st)
+                    elseif z.cash>=(opt.lateReserve or 0)+base.cost or not next(z.towers) or wi==maxWave then
+                        t,cost=install(winner.pos,#z.towers%3~=2)
+                    end
+                end
+            end
+            if not t and #z.towers<need then
                 if #z.towers==0 or z.towers[1].st.path1+z.towers[1].st.path2>=2 then
                     if z.cash>=base.cost then
                         local upper=opt.upper
@@ -361,6 +405,13 @@ function m.new(c,routes,los,spots)
         local pool={}
         local attempts=0
         local round=0
+        local function weakestLate(v)
+            local worst,loss=math.max(1,v.to),0
+            for _,w in ipairs(v.history) do
+                if w.loss>loss then worst,loss=w.wave,w.loss end
+            end
+            return worst
+        end
         local function weak(v)
             for _,w in ipairs(v.history) do
                 if w.wave<=5 and w.loss>1 then return w.wave end
@@ -419,18 +470,17 @@ function m.new(c,routes,los,spots)
         while not best do
             if s.cancel and s.cancel() then return end
             round+=1
-            if failed and failed.unknown>0 and failed.to<=1 then break end
             local parents=table.clone(pool)
-            if #parents==0 then break end
+            assert(#parents>0,"no evaluated candidates")
             local count=12
             local tested=0
             for i=1,count do
                 if s.cancel and s.cancel() then return end
                 local parent=parents[1+((round+i-2)%math.min(#parents,6))]
-                local w=i%3==0 and math.max(1,parent.v.to) or parent.w
-                local back=(i-1)%4
+                local w=i%3==0 and weakestLate(parent.v) or i%3==1 and math.max(1,parent.v.to) or parent.w
+                local back=w>=12 and 1+(i-1)%7 or (i-1)%4
                 local from=math.max(0,w-back)
-                local to=math.min(maxWave,w+1+(i%3))
+                local to=w>=12 and maxWave or math.min(maxWave,w+1+(i%3))
                 local p=table.clone(parent.p)
                 p.repairs=table.clone(parent.p.repairs or {})
                 local prev=settings(parent.p,from)
@@ -438,6 +488,14 @@ function m.new(c,routes,los,spots)
                 if w>=12 then core=math.max(core,math.min(12,4+round%9)) end
                 local patch={from=from,to=to,core=core,upper=i%2==0 and not prev.upper or prev.upper,expand=3+i%3,depth=12+((round*17+i*13)%100),longRange=0.12+(i%5)*0.12,seed=round*count+i,flex=i%3~=0,extra=w>=9 and 2+i%8 or 0,expandCash=w>=9 and 500+(i%5)*1000 or 5500,live=w>=12}
                 if i%2==0 then patch.upper=not prev.upper end
+                if w>=12 then
+                    patch.late=true
+                    patch.lateReserve=i%4==0 and 0 or i%4==1 and 1500 or i%4==2 and 3500 or 6500
+                    patch.lateWeight=0.7+(i%5)*0.25
+                    patch.longRange=0.25+(i%4)*0.2
+                    patch.extra=math.min(30,8+round%15+i)
+                    patch.expandCash=250+i%4*500
+                end
                 p.repairs[#p.repairs+1]=patch
                 if #p.repairs>18 then table.remove(p.repairs,1) end
                 tested+=1
@@ -445,12 +503,11 @@ function m.new(c,routes,los,spots)
                 if not evaluate(p,i,count,phase) then return end
                 task.wait()
             end
-            if tested==0 then break end
+            assert(tested>0,"repair batch empty")
             task.wait(0.1)
         end
-        local plan=best or failed
-        if not plan then return end
-        plan.ready=best~=nil
+        local plan=assert(best,"search ended without a validated plan")
+        plan.ready=true
         plan.model="adaptive_timed_shots_and_cash"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
