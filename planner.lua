@@ -13,6 +13,7 @@ function m.new(c)
     local queued
     local cursor=1
     local soldWave
+    local skipContinuation
     local all=c.ranger.all()
     local base=c.ranger.stats(0,0)
 
@@ -34,6 +35,7 @@ function m.new(c)
             rollout=nil
             cursor=1
             soldWave=nil
+            skipContinuation=nil
             queued=nil
         end
         return true
@@ -417,6 +419,18 @@ function m.new(c)
         last=s.time
         if not prepare(s) then return end
         if not rollout then return {wave=s.wave,revision=s.revision,recommendation={kind="hold",reason="no_validated_plan"},skip={allowed=false,reason="no_validated_plan"},mode="auto"} end
+        if skipContinuation and s.wave>skipContinuation.wave then
+            local plan=skipContinuation.plan
+            local moves={}
+            for _,v in ipairs(plan.moves) do if v.wave>=s.wave then moves[#moves+1]=v end end
+            rollout.moves=moves
+            rollout.history=plan.history
+            rollout.skips=plan.skips
+            rollout.policy=plan.policy
+            cursor=1
+            queued=nil
+            skipContinuation=nil
+        elseif skipContinuation and s.time-skipContinuation.at>5 then skipContinuation=nil end
         valueCache={}
         local ts=threat(s)
         local w=c.forecast.wave(s.wave)
@@ -497,11 +511,12 @@ function m.new(c)
             a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
             if a then a.reason="available_power" end
         end
-        if not a and s.wave>=1 and not rescue and not queued and w and s.waveAge and s.waveAge>=w.last+0.5 and c.executor.canSkip(s) and s.time-lastSkip>=1 then
-            local goal=rollout.moves[cursor]
-            if not goal or goal.wave>s.wave then
-                lastSkip=s.time
-                skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,nil)
+        if s.wave>=1 and not rescue and not queued and w and s.waveAge and c.executor.canSkip(s) and s.time-lastSkip>=3 and (not a or a.kind=="hold") then
+            lastSkip=s.time
+            skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,nil,search,rollout)
+            if skip.allowed and skip.plan then
+                skipContinuation={wave=s.wave,at=s.time,plan=skip.plan}
+                skip.plan=nil
             end
         end
         local top={}

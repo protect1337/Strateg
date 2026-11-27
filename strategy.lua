@@ -1,4 +1,4 @@
-local m={version="adaptive-v11"}
+local m={version="adaptive-v12"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -73,7 +73,7 @@ function m.new(c,routes,los,spots)
     local bossDataOK=#summon1==15 and #summon2==14
     local policies={}
     for i=1,24 do
-        policies[i]={core=1+(i-1)%3,upper=i%4~=0,mix=i%4==0 or i%5==0,crossEarly=i%3==0,depth=16+(i%6)*12,longRange=0.35+(i%4)*0.18,seed=i*31,risk=0.7+(i%5)*0.14,focus=1+(i%4)*0.25,fast=i%3~=0}
+        policies[i]={core=1+(i-1)%3,upper=i%4~=0,mix=i%4==0 or i%5==0,crossEarly=i%3==0,depth=16+(i%6)*12,longRange=0.35+(i%4)*0.18,seed=i*31,risk=0.7+(i%5)*0.14,fast=i%3~=0,skipDelay=({0,2,5,10,20,35})[(i-1)%6+1],placeBias=0.65+(i%5)*0.25,focus=1+(i%4)*0.25}
     end
     local dt=0.05
     local earlyLimit=cfg.StartingLives*0.10
@@ -87,8 +87,8 @@ function m.new(c,routes,los,spots)
     end
     local function sameSettings(a,b)
         if a==b then return true end
-        for k,v in pairs(a) do if k~="repairs" and b[k]~=v then return false end end
-        for k,v in pairs(b) do if k~="repairs" and a[k]~=v then return false end end
+        for k,v in pairs(a) do if k~="repairs" and k~="skipAges" and b[k]~=v then return false end end
+        for k,v in pairs(b) do if k~="repairs" and k~="skipAges" and a[k]~=v then return false end end
         return true
     end
     local function copyList(a)
@@ -105,7 +105,7 @@ function m.new(c,routes,los,spots)
         b.skips=table.clone(a.skips)
         return b
     end
-    local function simulate(s,idx,policy,stress,replay,notify,parent,keep,replaySkips)
+    local function simulate(s,idx,policy,stress,replay,notify,parent,keep,replaySkips,live)
         local r=routes[idx]
         local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},skips={},time=0,loss=0,earlyLoss=0,spent=0,income=0,bonuses=0}
         local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 40
@@ -121,11 +121,12 @@ function m.new(c,routes,los,spots)
         local hpDamage,shieldDamage,paidDamage,sludgeHits=0,0,0,0
         local checkpoints={}
         local firstWave=1
+        local initialCash=cfg.StartingCash
         local last=math.ceil(r.length)
-        if keep and parent then
+        if not live and keep and parent then
             for wi=0,maxWave-1 do
                 local cp=parent.checkpoints[wi]
-                if not cp or not sameSettings(settings(policy,wi),settings(parent.p,wi)) then break end
+                if not cp or not sameSettings(settings(policy,wi),settings(parent.p,wi)) or (policy.skipAges and policy.skipAges[wi])~=(parent.p.skipAges and parent.p.skipAges[wi]) then break end
                 checkpoints[wi]=cp
                 firstWave=wi+1
             end
@@ -161,7 +162,7 @@ function m.new(c,routes,los,spots)
             a.smokeAt=math.huge
             a.summons=0
             a.smoke=false
-            a.maxHp=a.hp
+            a.maxHp=a.maxHp or a.hp
             z.enemies[#z.enemies+1]=a
         end
         local function free(pos)
@@ -360,41 +361,35 @@ function m.new(c,routes,los,spots)
                     local long=math.max(0,merit(goal,v.pos,profile(v.pos,goal.range,idx))-old)
                     local totalPrice=math.max(price,goal.cost-v.st.cost)
                     local level=math.max(v.st.path1,v.st.path2)
-                    local rank=(gain/math.max(1,price)^0.65+long/totalPrice^0.65*1.5)*(1+level*(opt.focus or 1)*0.18)
+                    local rank=gain/math.max(1,price)^0.65+long/totalPrice^0.65*(opt.focus or 1)
                     if st.stealthDetection and not v.st.stealthDetection then rank+=0.1 end
                     local item={t=v,st=st,rank=rank,price=price}
                     if not best or rank>best.rank then best=item end
                     if price<=z.cash and (not affordable or rank>affordable.rank) then affordable=item end
                 end
             end
-            if #z.towers==0 then
-                t,cost=build(false)
-            elseif best and best.price<=z.cash then
-                t,cost=upgrade(best.t,best.st)
-            elseif threatened and affordable then
-                t,cost=upgrade(affordable.t,affordable.st)
-            elseif #z.towers<need and (wi==0 or threatened) and z.cash>=base.cost then
-                t,cost=build(threatened)
-            elseif not best and z.cash>=base.cost and #z.towers<cap then
-                t,cost=build(false)
-            elseif threatened and z.cash>=base.cost and #z.towers<cap then
-                -- Only add an unmaxed tower when it can cover a real deficit and
-                -- the existing upgrade cannot be funded before the threat leaks.
-                local q=urgent[1]
-                if q then
-                    local eta=(r.length-q.e.dist)/math.max(0.1,q.e.speed)
-                    local earn=0
-                    for _,item in ipairs(urgent) do if not item.e.noCash then earn+=math.min(item.e.hp,item.e.cashLeft or 0) end end
-                    local canFund=best and z.cash+c.economy.income(math.max(1,wi),earn*0.65)>=best.price
-                    if q.ratio>1.05 and (not canFund or eta<8) then
-                        local pos=site(wi,true)
-                        if pos and impact(base,profile(pos,base.range,idx),q.e,q.d)>0 then
-                            local upper=opt.upper~=false
-                            if opt.mix and #z.towers%3==1 then upper=not upper end
-                            t,cost=install(pos,upper)
-                        end
-                    end
+            local placeOption
+            if #z.towers<cap and z.cash>=base.cost then
+                local pos=site(wi,threatened)
+                if pos then
+                    local upper=opt.upper~=false
+                    if opt.mix and #z.towers%3==1 then upper=not upper end
+                    local goal=stats[upper and 52 or 25] or base
+                    local immediate=merit(base,pos,profile(pos,base.range,idx))
+                    local later=merit(goal,pos,profile(pos,goal.range,idx))
+                    local rank=(immediate/base.cost^0.65+later/goal.cost^0.65*(opt.focus or 1))*(opt.placeBias or 0.9)
+                    if threatened then rank*=1.3 elseif best and best.price>z.cash then rank*=0.65 end
+                    if wi==0 and #z.towers>=need then rank=0 end
+                    placeOption={pos=pos,upper=upper,rank=rank}
                 end
+            end
+            local choice=best and best.price<=z.cash and best or threatened and affordable or nil
+            if #z.towers==0 then
+                if placeOption then t,cost=install(placeOption.pos,placeOption.upper) end
+            elseif placeOption and placeOption.rank>0 and (not best or placeOption.rank>(choice and choice.rank or best.rank)) then
+                t,cost=install(placeOption.pos,placeOption.upper)
+            elseif choice then
+                t,cost=upgrade(choice.t,choice.st)
             end
             if t then
                 z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper}
@@ -429,7 +424,56 @@ function m.new(c,routes,los,spots)
                 end
             end
         end
-        if not checkpoints[0] then
+        if live then
+            firstWave=live.wave
+            z.cash=s.cash
+            initialCash=s.cash
+            z.lives=s.lives
+            z.time=live.age
+            nextBuy=z.time
+            for wi=1,firstWave-1 do
+                z.history[wi]=live.history and live.history[wi] or {wave=wi,lives=s.lives,loss=0,time=0}
+            end
+            for _,e in pairs(s.enemies or {}) do
+                local er=routes[e.pathIndex]
+                if not er then unknown+=1 continue end
+                local v=table.clone(e)
+                v.kids=c.forecast.children and c.forecast.children(e.type) or e.kids
+                local d=c.physics.project(er,c.physics.vec(e.pathPos))
+                if er~=r then d=d/math.max(1,er.length)*r.length end
+                add(v,d)
+                local q=z.enemies[#z.enemies]
+                q.burnUntil=z.time+math.max(0,e.burn and e.burn.Burn or 0)
+                q.burnTick=z.time
+                q.healAt=z.time+(e.bossHealIn or 12)
+                q.smoke=e.smokeHealed or false
+                if q.smoke then q.smokeAt=z.time end
+            end
+            for _,v in pairs(s.towers or {}) do
+                if v.owned and v.type=="Ranger" then
+                    local st=stats[v.path1*10+v.path2]
+                    if not st then unknown+=1 continue end
+                    local pos=c.physics.vec(v.pos)
+                    local interval=math.max(dt,v.burstInterval or st.burstInterval or dt)
+                    local left=math.clamp((st.burstSize or 1)-(v.burstIndex or 1)+1,1,st.burstSize or 1)
+                    if (v.burstReset or 0)<=0 then left=st.burstSize end
+                    local lastShot=z.time+(v.burstReset or 0)-2*interval
+                    local shot=z.time+math.max(0,v.nextAttack or 0)
+                    if left<st.burstSize then shot=math.max(z.time,lastShot+interval) end
+                    local stun=0
+                    for _,b in pairs(v.debuffs or {}) do if b.type=="Stun" or b.type=="Freeze" then stun=math.max(stun,b.remaining or 0) end end
+                    if v.stunned and stun==0 then stun=1 end
+                    local up=v.path1>=3 or v.path2<3 and (v.path1>v.path2 or v.path1==v.path2 and policy.upper~=false)
+                    local t={pos=pos,st=st,profile=profile(pos,st.range,idx),upper=up,nextShot=shot+stun,left=left,active=z.time,stunUntil=z.time+stun,lastShot=lastShot,query=v.query or 0,fireAt=z.time+(v.abilities and v.abilities.M203 and v.abilities.M203.cooldown or 0)}
+                    z.towers[#z.towers+1]=t
+                end
+            end
+            table.sort(z.towers,function(a,b)
+                if a.pos.X~=b.pos.X then return a.pos.X<b.pos.X end
+                if a.pos.Z~=b.pos.Z then return a.pos.Z<b.pos.Z end
+                return a.pos.Y<b.pos.Y
+            end)
+        elseif not checkpoints[0] then
             for i=1,12 do purchase(0,0) end
             z.time=cfg.SetUpTime or 15
             checkpoint(0)
@@ -438,17 +482,23 @@ function m.new(c,routes,los,spots)
             if s.cancel and s.cancel() then return end
             local w=c.forecast.wave(wi)
             unknown+=w.unknown or 0
-            local bonus=c.economy.bonus(wi)
+            local currentLive=live and wi==live.wave
+            local bonus=currentLive and 0 or c.economy.bonus(wi)
             z.cash+=bonus
             z.bonuses+=bonus
-            local start=z.time
+            local start=currentLive and 0 or z.time
             local event=1
+            local firstStep=currentLive and math.ceil(live.age/dt-1e-6) or 0
+            if currentLive then
+                while event<=#w.events and w.events[event].at<=live.age do event+=1 end
+            end
             local lossBefore=z.loss
             local skipped=false
             local limit=math.max(w.last or 0,cfg.Waves[wi].CustomWaveTime or 60)
-            if wi==maxWave then limit=math.max(180,w.last+r.length/0.8+30) end
+            if currentLive then limit=math.max(live.age+live.delay,firstStep*dt+dt) end
+            if wi==maxWave then limit=math.max(180,w.last+r.length/0.8+30,limit) end
             local steps=math.ceil(limit/dt)
-            for k=0,steps-1 do
+            for k=firstStep,steps-1 do
                 local age=k*dt
                 z.time=start+age
                 c.physics.sludgePrune(sludge,z.time)
@@ -456,7 +506,7 @@ function m.new(c,routes,los,spots)
                     local v=pending[j]
                     if v.at<=z.time+1e-6 then add(v.e,v.d) table.remove(pending,j) end
                 end
-                while event<=#w.events and w.events[event].at<=age do add(w.events[event].enemy,0) event+=1 end
+                while event<=#w.events and w.events[event].at<=age+1e-6 do add(w.events[event].enemy,0) event+=1 end
                 if z.time+1e-6>=nextBuy then
                     purchase(wi,age)
                     nextBuy=z.time+0.45
@@ -516,7 +566,13 @@ function m.new(c,routes,los,spots)
                         local p=t.profile
                         local best
                         for _,e in ipairs(z.enemies) do
-                            if not e.dead and not e.air and (not e.stealth or st.stealthDetection) and p.hit[math.floor(e.dist+0.5)] and (not best or e.dist>best.dist) then best=e end
+                            if not e.dead and not e.air and not e.invulnerable and not e.noDamage and not e.untargetable and not e.stasis and (not e.stealth or st.stealthDetection) and p.hit[math.floor(e.dist+0.5)] then
+                                local function priority(q)
+                                    if t.query==1 then return -q.dist elseif t.query==2 then return q.hp+q.shield elseif t.query==3 then return -q.hp-q.shield end
+                                    return q.dist
+                                end
+                                if not best or priority(e)>priority(best) then best=e end
+                            end
                         end
                         if best then
                             if st.path2==5 and z.time+1e-6>=(t.fireAt or 0) then
@@ -546,7 +602,7 @@ function m.new(c,routes,los,spots)
                     if not e.dead then
                         local speed,buffed=c.physics.sludgeSpeed(sludge,e,r,z.time,dt)
                         if buffed then sludgeHits+=1 end
-                        e.dist+=speed*dt
+                        if not e.stopped and not e.stunned and not e.stasis then e.dist=math.clamp(e.dist+speed*dt*(e.reverse and -1 or 1),0,r.length) end
                         if e.dist>=r.length then
                             e.dead=true
                             z.lastLeak={type=e.type,hp=e.hp,wave=wi,age=age}
@@ -560,26 +616,31 @@ function m.new(c,routes,los,spots)
                 end
                 for j=#z.enemies,n+1,-1 do z.enemies[j]=nil end
                 if z.lives<=0 then break end
-                if event>#w.events and n==0 and #pending==0 and age>=w.last then break end
+                if wi==maxWave and event>#w.events and n==0 and #pending==0 and age>=w.last then break end
                 local opt=settings(policy,wi)
-                if replaySkips and replaySkips[wi] and age+1e-6>=replaySkips[wi] then
-                    skipped=true z.skips[wi]=age break
+                local target
+                if replay then target=replaySkips and replaySkips[wi]
+                elseif currentLive then target=live.skipAt
+                elseif wi<maxWave and opt.fast and not cfg.Waves[wi].SkipWaveDisabled then
+                    local override=policy.skipAges and policy.skipAges[wi]
+                    if override~=nil then target=override>=0 and override or nil
+                    else target=math.max(15,(w.last or 0)+0.5)+(opt.skipDelay or 0) end
                 end
-                if not replay and wi<maxWave and opt.fast and age>=math.max(15,(w.last or 0)+0.5) and age<limit-2 and event>#w.events and #pending==0 then
-                    local remaining=0
-                    for _,e in ipairs(z.enemies) do remaining+=e.hp+(e.shield or 0) end
-                    local maxed=0
-                    for _,t in ipairs(z.towers) do if math.max(t.st.path1,t.st.path2)==5 then maxed+=1 end end
-                    local nextW=c.forecast.wave(wi+1)
-                    if nextW and remaining<=math.max(1,(nextW.hp or 0)*0.12) and (danger<0.7 or maxed>0 and remaining<500) then
-                        skipped=true
-                        z.skips[wi]=age
-                        break
+                if wi<maxWave and target and age+1e-6>=target and age<limit-dt then
+                    skipped=true
+                    z.skips[wi]=age
+                    if not (currentLive and live.cancelUnspawned) then
+                        while event<=#w.events do
+                            local v=w.events[event]
+                            pending[#pending+1]={e=v.enemy,d=0,at=start+v.at}
+                            event+=1
+                        end
                     end
+                    break
                 end
                 if k%480==0 then
                     if s.cancel and s.cancel() then return end
-                    task.wait()
+                    if not live or k%960==0 then task.wait() end
                 end
             end
             z.time+=dt
@@ -595,10 +656,87 @@ function m.new(c,routes,los,spots)
             if z.lives<=0 or unknown>0 then break end
         end
         local complete=#z.history==maxWave and #z.enemies==0 and #pending==0 and z.lives>0 and unknown==0
-        local ledgerError=z.cash-(cfg.StartingCash+z.income+z.bonuses-z.spent)
+        local ledgerError=z.cash-(initialCash+z.income+z.bonuses-z.spent)
         local bossHP=0
         for _,e in ipairs(z.enemies) do if e.type=="Plague Doctor" then bossHP+=e.hp end end
-        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,skips=z.skips,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1,lastLeak=z.lastLeak,bossHP=bossHP},checkpoints
+        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time-(live and live.age or 0),history=z.history,moves=z.moves,skips=z.skips,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1,lastLeak=z.lastLeak,bossHP=bossHP},checkpoints
+    end
+    local function objective(v,startHP)
+        local lost=math.max(0,startHP-v.lives)
+        return v.time+lost*0.4+80*(lost/math.max(1,startHP))^2
+    end
+    function x.compareSkips(s,rollout)
+        if not s.waveAge or not s.timerRemaining or s.timerRemaining<1.5 or s.wave>=maxWave then return {allowed=false,reason="no_window"} end
+        local wi=s.wave
+        local age=s.waveAge
+        local delay=s.timerRemaining
+        local policy=rollout.policy
+        local started=os.clock()
+        local limit=3
+        local simState=table.clone(s)
+        simState.cancel=function() return os.clock()-started>limit end
+        local candidates={}
+        local function evaluate(skipAt,cancelUnspawned)
+            local worst,finish,minimumCash,loss=math.huge,0,math.huge,0
+            local chosen
+            for idx in pairs(routes) do
+                local v=simulate(simState,idx,policy,false,nil,nil,nil,false,nil,{wave=wi,age=age,delay=delay,skipAt=skipAt,cancelUnspawned=cancelUnspawned,history=rollout.history})
+                if not v then return nil end
+                if not chosen then chosen=v end
+                if not v.complete or math.abs(v.ledgerError)>0.01 then
+                    return {complete=false,lives=v.lives,time=v.time,loss=v.loss,at=skipAt,remaining=v.remaining}
+                end
+                worst=math.min(worst,v.lives)
+                finish=math.max(finish,v.time)
+                minimumCash=math.min(minimumCash,v.cash)
+                loss=math.max(loss,v.loss)
+            end
+            return {complete=true,lives=worst,time=finish,loss=loss,cash=minimumCash,at=skipAt,score=objective({time=finish,lives=worst},s.lives),plan=chosen}
+        end
+        local wait=evaluate(nil,false)
+        if not wait then return {allowed=false,reason="branch_budget",tested=0} end
+        local first=age+0.5*(s.speed or 1)
+        local now=evaluate(first,false)
+        if not now then return {allowed=false,reason="branch_budget",tested=1} end
+        local w=c.forecast.wave(wi)
+        if now.complete and first<w.last then
+            local cancel=evaluate(first,true)
+            if not cancel then return {allowed=false,reason="branch_budget",tested=2} end
+            if not cancel.complete then now.complete=false now.cancelRisk=true
+            else
+                now.lives=math.min(now.lives,cancel.lives)
+                now.loss=math.max(now.loss,cancel.loss)
+                now.time=math.max(now.time,cancel.time)
+                now.score=objective(now,s.lives)
+            end
+        end
+        local best=wait.complete and wait or nil
+        local function consider(v)
+            if v and v.complete and (not best or v.score<best.score) then best=v end
+        end
+        consider(now)
+        local tested=2
+        for _,d in ipairs({2,5,10}) do
+            local at=first+d
+            if at<age+delay-1 then
+                local v=evaluate(at,false)
+                if not v then break end
+                tested+=1
+                if v.complete and at<w.last then
+                    local cancel=evaluate(at,true)
+                    if not cancel then break end
+                    if not cancel.complete then v.complete=false
+                    else v.lives=math.min(v.lives,cancel.lives) v.loss=math.max(v.loss,cancel.loss) v.time=math.max(v.time,cancel.time) v.score=objective(v,s.lives) end
+                end
+                consider(v)
+                candidates[#candidates+1]={at=at,complete=v.complete,lives=v.lives,time=v.time,loss=v.loss}
+            end
+        end
+        local saved=wait.complete and wait.time-now.time or delay
+        local allowed=now.complete and best==now and (not wait.complete or now.score+0.8<wait.score) and (not wait.complete or now.lives>=wait.lives-0.01)
+        local plan=allowed and now.plan or nil
+        now.plan=nil wait.plan=nil
+        return {allowed=allowed,reason=allowed and "full_match_skip" or best and best~=now and "better_wait_or_later" or "unsafe_skip",predictedLoss=now.loss,waitLoss=wait.loss,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1),delay=delay,tested=tested,now=now,wait=wait,alternatives=candidates,bestAt=best and best.at,plan=plan}
     end
     function x.search(s)
         local began=os.clock()
@@ -612,7 +750,7 @@ function m.new(c,routes,los,spots)
         local round=0
         local firstWinAt,firstWinAttempt
         local function stopSearch()
-            return best and (best.loss<=0.0001 and (attempts-firstWinAttempt>=12 or os.clock()-firstWinAt>=6) or attempts-firstWinAttempt>=80 or os.clock()-firstWinAt>=20)
+            return best and (attempts-firstWinAttempt>=64 or os.clock()-firstWinAt>=18)
         end
         local function weakestLate(v)
             local worst,loss=math.max(1,v.to),0
@@ -632,11 +770,12 @@ function m.new(c,routes,los,spots)
         end
         local function score(v)
             local eligible=v.complete and v.lives>0
-            return v.to*100000+(eligible and 10000000 or 0)-math.max(0,v.loss)*120-v.earlyLoss*60-(v.remainingHP or 0)*0.5-v.time*0.1
+            return v.to*100000+(eligible and 10000000 or 0)-(eligible and objective(v,cfg.StartingLives) or math.max(0,v.loss)*120+(v.remainingHP or 0)*0.5)
         end
         local function retain(v,p,w,stressTest,checkpoints)
             local key={}
             for _,a in ipairs(v.moves) do key[#key+1]=string.format("%d:%.2f:%.2f:%.2f:%d:%d",a.wave,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2) end
+            for wi=1,maxWave-1 do key[#key+1]=string.format("s%d:%.2f",wi,v.skips[wi] or -1) end
             key=table.concat(key,";")
             local rank=score(v)
             if stressTest then rank+=stressTest.to*5000+stressTest.lives*40-math.max(0,stressTest.earlyLoss-stressEarlyLimit)*100 end
@@ -686,7 +825,7 @@ function m.new(c,routes,los,spots)
                     v.routeLives=worst
                     v.checks=checks
                     if not firstWinAt then firstWinAt=os.clock() firstWinAttempt=attempts end
-                    local rank=math.max(0,cfg.StartingLives-worst)*10000+v.time+#v.moves*0.01
+                    local rank=objective({time=v.time,lives=worst},cfg.StartingLives)+#v.moves*0.001
                     v.selectionScore=rank
                     if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then best=v end
                 end
@@ -739,8 +878,20 @@ function m.new(c,routes,los,spots)
                 patch.focus=0.8+(i%5)*0.35
                 patch.risk=0.55+(i%6)*0.16
                 patch.fast=i%4~=0
-                p.repairs[#p.repairs+1]=patch
-                if #p.repairs>18 then table.remove(p.repairs,1) end
+                patch.skipDelay=({0,2,5,10,20,35})[(i+round)%6+1]
+                patch.placeBias=0.5+(i%6)*0.25
+                if best and i%2==0 then
+                    p=table.clone(parent.p)
+                    p.skipAges=table.clone(parent.p.skipAges or {})
+                    local wi=1+((round*5+i*3)%math.max(1,maxWave-1))
+                    local wv=c.forecast.wave(wi)
+                    local old=source.skips[wi] or math.max(15,wv.last+0.5)
+                    local delta=({-8,-4,-2,2,4,8})[(round+i)%6+1]
+                    p.skipAges[wi]=i%6==0 and -1 or math.max(15,wv.last+0.5,old+delta)
+                else
+                    p.repairs[#p.repairs+1]=patch
+                end
+                if p.repairs and #p.repairs>18 then table.remove(p.repairs,1) end
                 tested+=1
                 local phase=string.format("repair %d | weak wave %d | revise %d-%d",round,w,from,to)
                 if not evaluate(p,i,count,phase,parent) then return end
@@ -752,7 +903,7 @@ function m.new(c,routes,los,spots)
         end
         local plan=assert(best,"search ended without a validated plan")
         plan.ready=true
-        plan.model="adaptive_v11_compact_upgrade_first"
+        plan.model="adaptive_v12_time_objective_skip_branches"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts
