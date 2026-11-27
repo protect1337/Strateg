@@ -194,7 +194,7 @@ function m.new(common, reader, ctx, log)
             report(a, "failed", tostring(ok and reason or accepted))
             return false
         end
-        p.deadline = os.clock() + 5
+        p.deadline = os.clock() + (a.kind=="upgrade" and 1.5 or 5)
         pending = p
         report(a, "sent")
         return true

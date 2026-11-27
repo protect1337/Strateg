@@ -1,4 +1,4 @@
-local m={version="adaptive-v9"}
+local m={version="adaptive-v10"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -595,6 +595,10 @@ function m.new(c,routes,los,spots)
         local signatures={}
         local attempts=0
         local round=0
+        local firstWinAt,firstWinAttempt
+        local function stopSearch()
+            return best and (attempts-firstWinAttempt>=8 or os.clock()-firstWinAt>=5)
+        end
         local function weakestLate(v)
             local worst,loss=math.max(1,v.to),0
             for _,w in ipairs(v.history) do
@@ -646,11 +650,11 @@ function m.new(c,routes,los,spots)
                 local worst=v.lives
                 local checks={}
                 for k in pairs(routes) do
-                    local test=k==idx and v or simulate(s,k,policy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end)
+                    local test=simulate(s,k,policy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end)
                     if not test then return false end
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
-                    local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or "passed"
+                    local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or test.replayed~=#v.moves and "incomplete_replay" or "passed"
                     if s.progress then s.progress(i,n,test.to,test.lives,"route result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError,blockedMove=test.blockedMove,replayed=test.replayed}) end
                     if why~="passed" then
                         ok=false
@@ -666,7 +670,10 @@ function m.new(c,routes,los,spots)
                     v.ready=true
                     v.routeLives=worst
                     v.checks=checks
-                    if not best or v.time<best.time then best=v end
+                    if not firstWinAt then firstWinAt=os.clock() firstWinAttempt=attempts end
+                    local rank=v.time+math.max(0,25-worst)*0.8
+                    v.selectionScore=rank
+                    if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then best=v end
                 end
             end
             retain(v,policy,problem,failedStress,checkpoints)
@@ -674,9 +681,9 @@ function m.new(c,routes,los,spots)
         end
         for i,p in ipairs(policies) do
             if not evaluate(p,i,#policies,"search") then return end
-            if best then break end
+            if stopSearch() then break end
         end
-        while not best do
+        while not stopSearch() do
             if s.cancel and s.cancel() then return end
             round+=1
             local parents=table.clone(pool)
@@ -687,7 +694,7 @@ function m.new(c,routes,los,spots)
                 if s.cancel and s.cancel() then return end
                 local parent=parents[1+((round+i-2)%math.min(#parents,i%4==0 and 24 or 6))]
                 local source=parent.stress or parent.v
-                local w=i%3==0 and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
+                local w=(best and i%2==1 or i%3==0) and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
                 if parent.stress and i%3~=0 then w=parent.w end
                 local back=w>=12 and 1+(i-1)%10 or (i-1)%4
                 if parent.stress then back=math.max(back,i%6) end
@@ -716,7 +723,7 @@ function m.new(c,routes,los,spots)
                 tested+=1
                 local phase=string.format("repair %d | weak wave %d | revise %d-%d",round,w,from,to)
                 if not evaluate(p,i,count,phase,parent) then return end
-                if best then break end
+                if stopSearch() then break end
                 task.wait()
             end
             assert(tested>0,"repair batch empty")
@@ -724,7 +731,7 @@ function m.new(c,routes,los,spots)
         end
         local plan=assert(best,"search ended without a validated plan")
         plan.ready=true
-        plan.model="adaptive_v9_checkpoint_coverage_boss"
+        plan.model="adaptive_v10_replay_and_live_validation"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts

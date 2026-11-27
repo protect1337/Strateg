@@ -173,7 +173,6 @@ function m.new(c)
             local e=q.e
             if not e.air and not e.invulnerable and not e.noDamage and (not e.stealth or st.stealthDetection) then
                 local dps=st.dps*(st.ignoreResistance and 1 or 1-math.clamp((e.resist or {})[tostring(st.damageType)] or 0,0,1))
-                if st.path2>=4 then dps+=st.path2==5 and 12 or 5 end
                 local time=0
                 for t=0.5,math.min(45,q.eta),1 do
                     local p=c.physics.at(q.r,q.d+q.speed*t)
@@ -186,7 +185,7 @@ function m.new(c)
         return score
     end
 
-    local function emergency(s,ts)
+    local function emergency(s,ts,plannedAction,queuedAction)
         if #ts==0 then return end
         local urgent={}
         for _,q in ipairs(ts) do
@@ -207,6 +206,29 @@ function m.new(c)
         if loss<=0 then return nil,baseline end
         local lethal=loss>=s.lives
         if not lethal then return nil,baseline end
+        local function simulateStep(a)
+            if not a then return end
+            local v=table.clone(a)
+            if v.kind=="upgrade" then
+                local t=s.towers[v.id]
+                if not t then return end
+                local n=v.levels or 1
+                v.stats=c.ranger.stats(t.path1+(v.path==1 and n or 0),t.path2+(v.path==2 and n or 0))
+            elseif v.kind=="place" then
+                v.pos=c.physics.vec(v.pos)
+                v.stats=base
+            else return end
+            v.at=0.45*(s.speed or 1)
+            local r=c.combat.run(sim,routes,c.physics,los,v,h)
+            return r.leaks+r.unknown
+        end
+        local planLoss=simulateStep(plannedAction) or loss
+        local queueLoss=simulateStep(queuedAction)
+        if queueLoss then planLoss=math.min(planLoss,queueLoss) end
+        baseline.plannedLoss=planLoss
+        if planLoss<s.lives then return nil,baseline end
+        -- Finish an already accepted affordable purchase chain instead of repeatedly replacing it.
+        if queuedAction then return nil,baseline end
         local budget=s.cash
         local sales={}
         for id,t in pairs(s.towers) do
@@ -291,13 +313,15 @@ function m.new(c)
             local r=c.combat.run(trial,routes,c.physics,los,action,h)
             local remaining=r.leaks+r.unknown
             local gain=loss-remaining
-            if gain<=0.01 or (#sold>0 or a.kind=="place" and s.wave<12) and remaining>=s.lives then return end
+            if gain<=0.01 or remaining>=planLoss-0.01 then return end
+            if remaining>=s.lives and (#sold>0 or plannedAction or a.kind=="place" and s.wave<#c.economy.config.Waves) then return end
             local score=(remaining<s.lives and 1000000 or 0)+gain*100-#sold*30-a.price*0.002
             if not best or score>best.score then best={a=a,sold=sold,r=r,score=score,loss=remaining} end
         end
         for i=1,math.min(6,#options) do assess(options[i]) end
         if not best then return nil,baseline end
         local a=best.a
+        baseline.rescueLoss=best.loss
         local goal={kind=a.kind,id=a.id,pos=a.pos and c.physics.pack(a.pos),path1=a.stats.path1,path2=a.stats.path2,live=true}
         if #best.sold>0 then
             soldWave=s.wave
@@ -307,9 +331,9 @@ function m.new(c)
         queued=goal
         if a.kind=="upgrade" then
             local step=nextStep(s.towers[a.id],a.stats,s.cash)
-            if step then step.reason="emergency_upgrade" return pack(step),baseline end
+            if step then step.reason="emergency_upgrade" step.predictedLoss=best.loss return pack(step),baseline end
         else
-            return {kind="place",pos=goal.pos,price=base.cost,reason="emergency_intercept"},baseline
+            return {kind="place",pos=goal.pos,price=base.cost,reason="emergency_intercept",predictedLoss=best.loss},baseline
         end
         return nil,baseline
     end
@@ -357,7 +381,6 @@ function m.new(c)
             local gain=st.dps-(old and old.dps or 0)
             if st.ignoreResistance and not (old and old.ignoreResistance) then gain+=st.dps*0.8 end
             if st.stealthDetection and not (old and old.stealthDetection) and wi>=6 then gain+=st.dps*1.6 end
-            if st.path2>=4 and (not old or old.path2<st.path2) then gain+=8 end
             if future<=0 or liveOnly and current<=0 then return end
             local v=(current+(liveOnly and 0 or future*gain*0.35))/math.max(1,a.price)^0.55
             if old then v*=1.6 elseif s.towerCount>=3 then v*=0.35 end
@@ -396,19 +419,56 @@ function m.new(c)
         if not rollout then return {wave=s.wave,revision=s.revision,recommendation={kind="hold",reason="no_validated_plan"},skip={allowed=false,reason="no_validated_plan"},mode="auto"} end
         valueCache={}
         local ts=threat(s)
+        local w=c.forecast.wave(s.wave)
+        local final=s.wave==#c.economy.config.Waves and w and s.waveAge and s.waveAge>=w.last+1
+        local planned,plannedAction=false,nil
+        while cursor<=#rollout.moves do
+            local goal=rollout.moves[cursor]
+            if final then goal=table.clone(goal) goal.live=true end
+            local v,done=follow(s,goal,ts)
+            if done then cursor+=1
+            else
+                planned=true
+                if goal.wave<=s.wave and v then plannedAction=v v.reason="verified_plan" end
+                break
+            end
+        end
+        local queuedAction
+        if queued then
+            local done
+            queuedAction,done=follow(s,queued,ts)
+            if done then queued=nil end
+        end
         local rescue,baseline
         if s.wave>=1 and (s.time-lastEmergency>=0.7 or baselineWave~=s.wave) then
             lastEmergency=s.time
             baselineWave=s.wave
-            rescue,baseline=emergency(s,ts)
+            rescue,baseline=emergency(s,ts,plannedAction,queuedAction)
             cachedBaseline=baseline
-        else
-            baseline=cachedBaseline
+        else baseline=cachedBaseline end
+        local targets
+        if final and not rescue and not queuedAction and not plannedAction and baseline and baseline.leaks+baseline.unknown>=s.lives then
+            local candidates=c.tactics.target(s,ts,los)
+            if candidates and candidates[1] then
+                local sim=table.clone(s)
+                sim.towers=table.clone(s.towers)
+                sim.enemies={}
+                for id,e in pairs(s.enemies) do
+                    local v=table.clone(e)
+                    v.kids=c.forecast.children(e.type)
+                    sim.enemies[id]=v
+                end
+                local h=math.min(66,math.max(5,ts[1] and ts[1].eta+1 or 5))
+                for _,q in ipairs(ts) do h=math.max(h,math.min(66,q.eta+0.5)) end
+                local initial=c.combat.run(sim,routes,c.physics,los,nil,h)
+                local a=candidates[1]
+                local t=table.clone(sim.towers[a.id])
+                t.query=a.query
+                sim.towers[a.id]=t
+                local trial=c.combat.run(sim,routes,c.physics,los,nil,h)
+                if trial.leaks+trial.unknown+0.01<initial.leaks+initial.unknown then targets={a} end
+            end
         end
-        local targets=nil
-        if s.wave>=12 then targets=c.tactics.target(s,ts,los) end
-        local w=c.forecast.wave(s.wave)
-        local final=s.wave==#c.economy.config.Waves and w and s.waveAge and s.waveAge>=w.last+1
         local liveSpots
         local function livePositions()
             if not liveSpots then
@@ -422,27 +482,7 @@ function m.new(c)
             return liveSpots
         end
         local skip={allowed=false,reason=s.wave<9 and "opening_capital_lock" or "priority"}
-        local a=rescue
-        if s.wave<8 and (not baseline or baseline.leaks+baseline.unknown<s.lives or not a) then a=nil queued=nil end
-        if not a and queued then
-            local done
-            a,done=follow(s,queued,ts)
-            if done then queued=nil end
-        end
-        local planned=false
-        if not a and rollout then
-            while cursor<=#rollout.moves do
-                local goal=rollout.moves[cursor]
-                if final then goal=table.clone(goal) goal.live=true end
-                local v,done=follow(s,goal,ts)
-                if done then cursor+=1
-                else
-                    planned=true
-                    if goal.wave<=s.wave and v then a=v a.reason="verified_plan" end
-                    break
-                end
-            end
-        end
+        local a=rescue or queuedAction or plannedAction
         if not a and final and not queued then
             a=c.tactics.recycle(s,ts,los)
             if not a then
@@ -499,7 +539,7 @@ function m.new(c)
             local q=ts[i]
             top[i]={id=q.id,type=q.e.type,hp=q.e.hp,eta=q.eta,etaReal=q.eta/math.max(0.01,s.speed or 1),dist=q.d,boss=q.e.boss}
         end
-        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives}
+        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives,move=cursor,plannedWaveLoss=rollout.history[s.wave] and rollout.history[s.wave].loss,plannedWaveHP=rollout.history[s.wave] and rollout.history[s.wave].lives}
     end
     return x
 end
