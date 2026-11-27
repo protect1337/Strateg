@@ -30,13 +30,13 @@ function m.new(c)
                     for i = 1, d.Count or 1 do
                         local cr = {}
                         for _, item in pairs(child.DamageReductionTable or {}) do cr[tostring(item.DamageType)] = item.DamageReduction end
-                        table.insert(kids, {type = d.EnemyType, hp = child.Health, shield = child.Shield or 0, speed = child.Speed, resist = cr, noCash = child.NoCash, delay = d.Delay or 0})
+                        table.insert(kids, {type = d.EnemyType, hp = child.Health, shield = child.Shield or 0, speed = child.Speed, radius = child.Radius, stealth = child.Stealth, air = child.AirUnit, resist = cr, noCash = child.NoCash, delay = d.Delay or 0})
                         extra += child.Health + (child.Shield or 0)
                     end
                 end
             end
         end
-        return {type = seq.EnemyType, hp = hp, shield = shield, speed = cfg.Speed, stealth = seq.Stealth or cfg.Stealth, air = cfg.AirUnit, resist = resist, maxDamage = cfg.MaximumDamage, allReduction = cfg.AllDamageReduction, noCash = cfg.NoCash, kids = kids, extra = extra, boss = cfg.IsBoss, complex = cfg.AbilityNames ~= nil or cfg.DeathAbilityNames ~= nil or cfg.SecondLifeData ~= nil}
+        return {type = seq.EnemyType, hp = hp, shield = shield, speed = cfg.Speed, radius = cfg.Radius, stealth = seq.Stealth or cfg.Stealth, air = cfg.AirUnit, resist = resist, maxDamage = cfg.MaximumDamage, allReduction = cfg.AllDamageReduction, noCash = cfg.NoCash, kids = kids, extra = extra, boss = cfg.IsBoss, complex = cfg.AbilityNames ~= nil or cfg.DeathAbilityNames ~= nil or cfg.SecondLifeData ~= nil}
     end
 
     for wi, w in ipairs(all) do

@@ -79,4 +79,35 @@ function m.los(map)
     end
 end
 
+function m.sludgeAdd(pool,e,r,time)
+    if e.type~="Hazmat Zombie Rework" then return end
+    pool[#pool+1]={pos=m.at(r,e.dist),start=time+0.55,finish=time+6.55}
+end
+
+function m.sludgePrune(pool,time)
+    for i=#pool,1,-1 do
+        if time>=pool[i].finish then table.remove(pool,i) end
+    end
+end
+
+function m.sludgeSpeed(pool,e,r,time,dt)
+    local speed=e.speed or 0
+    if (e.sludgeUntil or 0)>time then return speed*1.8,false end
+    if #pool==0 or e.air then return speed,false end
+    local a=m.at(r,e.dist)
+    local b=m.at(r,e.dist+speed*dt*(e.reverse and -1 or 1))
+    local d=b-a
+    local dot=d:Dot(d)
+    for _,v in ipairs(pool) do
+        if time>=v.start and time<v.finish then
+            local t=dot>0 and math.clamp((v.pos-a):Dot(d)/dot,0,1) or 0
+            if (v.pos-a-d*t).Magnitude<=(e.radius or 1)+0.5 then
+                e.sludgeUntil=time+9
+                return speed*1.8,true
+            end
+        end
+    end
+    return speed,false
+end
+
 return m

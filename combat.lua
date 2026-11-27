@@ -1,7 +1,7 @@
 local m = {}
 
 local function adjusted(t, e)
-    local resist = not t.ignoreResistance and (e.resist[tostring(t.damageType)] or 0) or 0
+    local resist = not t.ignoreResistance and ((e.resist or {})[tostring(t.damageType)] or 0) or 0
     if resist ~= 0 then resist = math.clamp(resist + (e.resistModifier or 0), 0, 1) end
     local damage = t.damage * (1 - resist) * (1 - math.clamp(e.allReduction or 0, 0, 1))
     if e.maxDamage and e.maxDamage >= 0 then damage = math.min(damage, e.maxDamage) end
@@ -11,6 +11,7 @@ end
 function m.run(snapshot, routes, physics, los, action, horizon)
     local enemies = {}
     local towers = {}
+    local sludge = {}
     local result = {hpDamage = 0, cashDamage = 0, shieldDamage = 0, leaks = 0, kills = 0, remaining = 0, remainingShield = 0, leaked = {}, children = 0, killTime = 0, finish = horizon, firstDamage = nil, unknown = 0}
     for _, e in pairs(snapshot.enemies) do
         local r = routes[e.pathIndex]
@@ -41,7 +42,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                     for k, v in pairs(action.stats) do c[k] = v end
                 end
             end
-            c.wait = math.max(0, t.nextAttack or 0)
+            c.nextShot = math.max(0, t.nextAttack or 0)
             c.stunUntil=0
             if t.stunned then
                 for _,b in pairs(t.debuffs or {}) do
@@ -51,10 +52,12 @@ function m.run(snapshot, routes, physics, los, action, horizon)
             end
             c.left = math.clamp((c.burstSize or 1) - (t.burstIndex or 1) + 1, 1, c.burstSize or 1)
             if (t.burstReset or 0) <= 0 then c.left = c.burstSize or 1 end
-            c.idle = 0
-            c.grenadeAt = 0
-            local ab = t.abilities and (t.abilities.GrenadeLevel2 or t.abilities.GrenadeLevel1)
-            if ab then c.grenadeAt = ab.cooldown or 0 end
+            if c.left<(c.burstSize or 1) then
+                local interval=math.max(0.05,c.burstInterval or 0.05)
+                c.lastShot=(t.burstReset or 0)-2*interval
+                c.nextShot=math.max(0,c.lastShot+interval)
+            end
+            c.nextShot+=c.stunUntil
             table.insert(towers, c)
         end
     end
@@ -62,10 +65,8 @@ function m.run(snapshot, routes, physics, los, action, horizon)
         local c = table.clone(action.stats)
         c.pos = action.pos
         c.activeAt = action.at or 0
-        c.wait = 0
+        c.nextShot = c.activeAt
         c.left = c.burstSize or 1
-        c.idle = 0
-        c.grenadeAt = 0
         table.insert(towers, c)
     end
     local function hit(e, damage, time)
@@ -81,6 +82,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
         if e.hp <= 0 then
             e.done = true
             result.kills += 1
+            physics.sludgeAdd(sludge,e,e.route,time)
             result.killTime += time - e.spawnAt
             for _, kid in ipairs(e.kids or {}) do
                 local child = table.clone(kid)
@@ -96,12 +98,12 @@ function m.run(snapshot, routes, physics, los, action, horizon)
         end
     end
 
-    local shots = {}
-    local dt = 0.1
+    local dt = 0.05
     local steps = math.floor(horizon / dt + 0.5)
     for i = 0, steps do
         local time = i * dt
-        if i > 0 and i % 100 == 0 then task.wait() end
+        if i > 0 and i % 200 == 0 then task.wait() end
+        physics.sludgePrune(sludge,time)
         for _, e in ipairs(enemies) do
             if not e.done and time >= e.spawnAt then
                 e.pos = physics.at(e.route, e.dist)
@@ -122,18 +124,6 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 end
             end
         end
-        for j = #shots, 1, -1 do
-            local shot = shots[j]
-            if time >= shot.at then
-                table.remove(shots,j)
-                for _,e in ipairs(enemies) do
-                    if not e.done and time >= e.spawnAt and not e.air and not e.invulnerable and not e.noDamage and not e.untargetable and not e.stasis and (not e.stealth or shot.stealth) and (e.pos-shot.pos).Magnitude <= shot.radius then
-                        local damage = adjusted({damage=shot.damage,damageType="Explosive",ignoreResistance=false},e)
-                        hit(e,damage,time)
-                    end
-                end
-            end
-        end
         local active = false
         for _, e in ipairs(enemies) do if not e.done then active = true break end end
         if not active then result.finish = time break end
@@ -142,10 +132,10 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 for k,v in pairs(t.pendingStats) do t[k]=v end
                 t.pendingStats=nil
                 t.left=t.burstSize or 1
-                t.wait=math.min(t.wait,0)
+                t.nextShot=math.max(time,math.min(t.nextShot,time+t.reload))
+                t.lastShot=nil
             end
-            if time > 0 then t.wait -= dt end
-            if t.wait <= 0 and time>=(t.stunUntil or 0) and (t.pendingStats or not t.activeAt or time >= t.activeAt) then
+            if time+1e-6>=t.nextShot and time>=(t.stunUntil or 0) and (t.pendingStats or not t.activeAt or time >= t.activeAt) then
                 local best
                 local progress = -math.huge
                 for _, e in ipairs(enemies) do
@@ -159,37 +149,28 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                     end
                 end
                 if best then
-                    t.idle = 0
                     local damage = adjusted(t, best)
                     if damage > 0 and not result.firstDamage then result.firstDamage = time end
-                    if t.path2 and t.path2 >= 4 and time >= (t.grenadeAt or 0) then
-                        local flight=0.15+math.max(0.15,(best.pos-t.pos).Magnitude/15)
-                        local radius=t.path2==5 and 4 or 3
-                        local future=physics.at(best.route,best.dist+(best.speed or 0)*flight*(best.reverse and -1 or 1))
-                        local center=best.pos:Lerp(future,0.5)
-                        if (future-center).Magnitude<=radius then
-                            table.insert(shots,{at=time+flight,pos=center,radius=radius,damage=(t.path2==5 and 100 or 75)*0.7,stealth=t.stealthDetection})
-                            t.grenadeAt=time+(t.path2==5 and 5 or 8)
-                        end
-                    end
                     hit(best, damage, time)
+                    t.lastShot=time
                     t.left -= 1
                     if t.left == 0 then
                         t.left = t.burstSize or 1
-                        t.wait += math.max(dt, t.reload)
+                        t.nextShot=time+math.max(dt,t.reload)
                     else
-                        t.wait += math.max(dt, t.burstInterval or dt)
+                        t.nextShot=time+math.max(dt,t.burstInterval or dt)
                     end
-                else
-                    t.wait = 0
-                    t.idle += dt
-                    if t.idle >= 2 * math.max(dt, t.burstInterval or dt) then t.left = t.burstSize or 1 end
+                elseif t.left<(t.burstSize or 1) and t.lastShot and time+1e-6>=t.lastShot+2*math.max(dt,t.burstInterval or dt) then
+                    t.left=t.burstSize or 1
+                    t.nextShot=time+math.max(dt,t.reload)
                 end
             end
         end
         for _, e in ipairs(enemies) do
             if not e.done and time >= e.spawnAt and not e.stopped and not e.stunned and not e.stasis then
-                e.dist = math.clamp(e.dist + (e.speed or 0) * dt * (e.reverse and -1 or 1), 0, e.route.length)
+                local speed,buffed=physics.sludgeSpeed(sludge,e,e.route,time,dt)
+                if buffed then result.sludgeHits=(result.sludgeHits or 0)+1 end
+                e.dist = math.clamp(e.dist + speed * dt * (e.reverse and -1 or 1), 0, e.route.length)
             end
         end
     end
