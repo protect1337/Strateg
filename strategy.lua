@@ -71,6 +71,13 @@ function m.new(c,routes,los,spots)
         {core=2,upper=true,expand=5,siteMode=2},{core=3,upper=false,expand=5,siteMode=3}
     }
     local dt=0.15
+    local function settings(policy,wi)
+        local a=policy
+        for _,patch in ipairs(policy.repairs or {}) do
+            if wi>=patch.from and wi<=patch.to then a=patch end
+        end
+        return a
+    end
     local function simulate(s,idx,policy,stress,replay,notify)
         local r=routes[idx]
         local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},time=0,loss=0,earlyLoss=0}
@@ -104,6 +111,7 @@ function m.new(c,routes,los,spots)
         end
         local function site(wi)
             local best,score
+            local opt=settings(policy,wi)
             for i,item in ipairs(spots) do
                 local p=item.pos
                 if free(p) then
@@ -113,9 +121,22 @@ function m.new(c,routes,los,spots)
                         local near=math.huge
                         for _,t in ipairs(z.towers) do near=math.min(near,(p-t.pos).Magnitude) end
                         local density=near==math.huge and 1 or 1+0.55/(1+math.max(0,near-spacing)/spacing)
-                        local depth=policy.siteMode==2 and 40 or policy.siteMode==3 and 65 or 17
+                        local depth=opt.depth or (opt.siteMode==2 and 40 or opt.siteMode==3 and 65 or 17)
                         local early=1/(1+a.first/(wi<8 and depth or 55))
-                        local v=(a.length+b.length*0.18)*early*density
+                        local v=(a.length+b.length*(opt.longRange or 0.18))*early*density
+                        if opt.seed then v*=1+0.12*math.sin(i*12.9898+opt.seed*78.233) end
+                        if wi>=12 and opt.live then
+                            local reach=0
+                            for _,e in ipairs(z.enemies) do
+                                if not e.dead then
+                                    local start=math.floor(e.dist+0.5)
+                                    for d=start,math.min(math.ceil(r.length),start+40),4 do
+                                        if b.hit[d] then reach+=1 end
+                                    end
+                                end
+                            end
+                            v*=1+math.min(3,reach*0.07)
+                        end
                         if not score or v>score then best,score=p,v end
                     end
                 end
@@ -155,14 +176,19 @@ function m.new(c,routes,los,spots)
                 return
             end
             local t,cost
-            local need=policy.core
-            if wi<=2 and need>2 then need=2 end
+            local opt=settings(policy,wi)
+            local need=opt.core
+            if wi<=2 and need>3 then need=3 end
             local stealth=false
             for _,v in ipairs(z.towers) do if v.st.stealthDetection then stealth=true break end end
             local pick
             if #z.towers<need then
                 if #z.towers==0 or z.towers[1].st.path1+z.towers[1].st.path2>=2 then
-                    if z.cash>=base.cost then t,cost=install(site(wi),#z.towers%2==0 and policy.upper or #z.towers%2==1 and not policy.upper) end
+                    if z.cash>=base.cost then
+                        local upper=opt.upper
+                        if #z.towers%2==1 then upper=not upper end
+                        t,cost=install(site(wi),upper)
+                    end
                 end
             end
             if not t then
@@ -172,7 +198,7 @@ function m.new(c,routes,los,spots)
                 end
                 if not t and not pick then
                     for _,v in ipairs(z.towers) do
-                        if path(v.st,v.upper) and math.max(v.st.path1,v.st.path2)<policy.expand then
+                        if path(v.st,v.upper) and math.max(v.st.path1,v.st.path2)<opt.expand then
                             if not pick or v.st.cost>pick.st.cost then pick=v end
                         end
                     end
@@ -180,7 +206,7 @@ function m.new(c,routes,los,spots)
                         for _,v in ipairs(z.towers) do
                             if path(v.st,v.upper) and (not pick or v.st.cost>pick.st.cost) then pick=v end
                         end
-                        if wi>=9 and #z.towers<cap and z.cash>=5500 and #z.towers<math.max(need,wi-5) then
+                        if wi>=9 and #z.towers<cap and z.cash>=(opt.expandCash or 5500) and #z.towers<math.max(need,wi-5+(opt.extra or 0)) then
                             t,cost=install(site(wi),#z.towers%2==0)
                         end
                     end
@@ -188,6 +214,22 @@ function m.new(c,routes,los,spots)
                 if not t and pick then
                     local st=path(pick.st,pick.upper)
                     if st then t,cost=upgrade(pick,st) end
+                    if not t and opt.flex and wi>=3 then
+                        local choice,nextSt,rank
+                        for _,v in ipairs(z.towers) do
+                            local a=path(v.st,v.upper)
+                            if a and a.cost-v.st.cost<=z.cash then
+                                local gain=(a.dps-v.st.dps)/math.max(1,a.cost-v.st.cost)
+                                if a.stealthDetection and not v.st.stealthDetection then gain+=0.02 end
+                                if a.ignoreResistance and not v.st.ignoreResistance then gain+=0.02 end
+                                if not rank or gain>rank then choice,nextSt,rank=v,a,gain end
+                            end
+                        end
+                        if choice then t,cost=upgrade(choice,nextSt)
+                        elseif wi>=6 and #z.towers<math.min(cap,need+(opt.extra or 0)) and z.cash>=base.cost then
+                            t,cost=install(site(wi),#z.towers%2==0)
+                        end
+                    end
                 elseif not t and not pick and z.cash>=base.cost and #z.towers<cap then
                     t,cost=install(site(wi),#z.towers%2==0)
                 end
@@ -316,23 +358,50 @@ function m.new(c,routes,los,spots)
         for k,r in pairs(routes) do if not short or r.length<short then idx,short=k,r.length end end
         if not idx then return end
         local best,failed
-        local function report(p,w,z,phase)
-            if s.progress then s.progress(p,#policies,w,z.lives,phase) end
+        local pool={}
+        local attempts=0
+        local round=0
+        local function weak(v)
+            for _,w in ipairs(v.history) do
+                if w.wave<=5 and w.loss>1 then return w.wave end
+            end
+            for _,w in ipairs(v.history) do
+                if w.loss>25 then return w.wave end
+            end
+            return math.max(1,v.to)
         end
-        for i,policy in ipairs(policies) do
-            local v=simulate(s,idx,policy,false,nil,function(w,z) report(i,w,z,"search") end)
-            if not v then return end
-            if not failed or v.to>failed.to or v.to==failed.to and v.loss<failed.loss then failed=v end
+        local function score(v)
+            return v.to*10000-math.max(0,v.loss)*2-math.max(0,v.earlyLoss-5)*800-(v.complete and 0 or 1000)
+        end
+        local function retain(v,p,w)
+            local item={v=v,p=p,w=w or weak(v),rank=score(v)}
+            pool[#pool+1]=item
+            table.sort(pool,function(a,b) return a.rank>b.rank end)
+            while #pool>16 do table.remove(pool) end
+        end
+        local function report(i,n,w,z,phase)
+            if s.progress then s.progress(i,n,w,z.lives,phase) end
+        end
+        local function evaluate(policy,i,n,phase)
+            attempts+=1
+            local v=simulate(s,idx,policy,false,nil,function(w,z) report(i,n,w,z,phase) end)
+            if not v then return false end
+            if not failed or score(v)>score(failed) then failed=v end
+            local problem=weak(v)
             if v.complete and v.lives>=150 and v.earlyLoss<=5 then
                 local ok=true
                 local worst=v.lives
                 local checks={}
                 for k in pairs(routes) do
-                    local test=simulate(s,k,policy,true,v.moves,function(w,z) report(i,w,z,"stress") end)
-                    if not test then return end
+                    local test=simulate(s,k,policy,true,v.moves,function(w,z) report(i,n,w,z,"stress "..phase) end)
+                    if not test then return false end
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
-                    if not test.complete or test.lives<100 or test.earlyLoss>5 then ok=false break end
+                    if not test.complete or test.lives<100 or test.earlyLoss>5 then
+                        ok=false
+                        problem=weak(test)
+                        break
+                    end
                 end
                 if ok then
                     v.ready=true
@@ -341,13 +410,52 @@ function m.new(c,routes,los,spots)
                     if not best or v.time<best.time then best=v end
                 end
             end
+            retain(v,policy,problem)
+            return true
+        end
+        for i,p in ipairs(policies) do
+            if not evaluate(p,i,#policies,"search") then return end
+        end
+        while not best do
+            if s.cancel and s.cancel() then return end
+            round+=1
+            if failed and failed.unknown>0 and failed.to<=1 then break end
+            local parents=table.clone(pool)
+            if #parents==0 then break end
+            local count=12
+            local tested=0
+            for i=1,count do
+                if s.cancel and s.cancel() then return end
+                local parent=parents[1+((round+i-2)%math.min(#parents,6))]
+                local w=i%3==0 and math.max(1,parent.v.to) or parent.w
+                local back=(i-1)%4
+                local from=math.max(0,w-back)
+                local to=math.min(maxWave,w+1+(i%3))
+                local p=table.clone(parent.p)
+                p.repairs=table.clone(parent.p.repairs or {})
+                local prev=settings(parent.p,from)
+                local core=math.clamp((prev.core or 2)+((i%3)-1),1,w<=5 and 3 or math.min(12,math.max(3,w-3)))
+                if w>=12 then core=math.max(core,math.min(12,4+round%9)) end
+                local patch={from=from,to=to,core=core,upper=i%2==0 and not prev.upper or prev.upper,expand=3+i%3,depth=12+((round*17+i*13)%100),longRange=0.12+(i%5)*0.12,seed=round*count+i,flex=i%3~=0,extra=w>=9 and 2+i%8 or 0,expandCash=w>=9 and 500+(i%5)*1000 or 5500,live=w>=12}
+                if i%2==0 then patch.upper=not prev.upper end
+                p.repairs[#p.repairs+1]=patch
+                if #p.repairs>18 then table.remove(p.repairs,1) end
+                tested+=1
+                local phase=string.format("repair %d | weak wave %d | revise %d-%d",round,w,from,to)
+                if not evaluate(p,i,count,phase) then return end
+                task.wait()
+            end
+            if tested==0 then break end
+            task.wait(0.1)
         end
         local plan=best or failed
         if not plan then return end
         plan.ready=best~=nil
-        plan.model="timed_shots_and_cash"
+        plan.model="adaptive_timed_shots_and_cash"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
+        plan.attempts=attempts
+        plan.repairRounds=round
         return nil,plan
     end
     return x
