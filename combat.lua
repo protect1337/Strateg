@@ -11,7 +11,7 @@ end
 function m.run(snapshot, routes, physics, los, action, horizon)
     local enemies = {}
     local towers = {}
-    local result = {hpDamage = 0, cashDamage = 0, shieldDamage = 0, leaks = 0, kills = 0, remaining = 0, remainingShield = 0, children = 0, killTime = 0, finish = horizon, firstDamage = nil, unknown = 0}
+    local result = {hpDamage = 0, cashDamage = 0, shieldDamage = 0, leaks = 0, kills = 0, remaining = 0, remainingShield = 0, leaked = {}, children = 0, killTime = 0, finish = horizon, firstDamage = nil, unknown = 0}
     for _, e in pairs(snapshot.enemies) do
         local r = routes[e.pathIndex]
         if r then
@@ -96,6 +96,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 if e.dist >= e.route.length and not e.reverse then
                     e.done = true
                     result.leaks += e.hp
+                    result.leaked[e.id] = {hp=e.hp,at=time,type=e.type}
                 end
             end
         end

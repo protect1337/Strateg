@@ -46,7 +46,7 @@ function m.new(c, routes, los, spots)
         local key=string.format("%.2f:%.2f:%.2f:%d:%d:%d",pos.X,pos.Y,pos.Z,st.path1,st.path2,wi)
         if strengths[key] then return strengths[key] end
         local sum, norm = 0,0
-        for offset=0,math.min(9,maxWave-wi) do
+        for offset=0,maxWave-wi do
             local w=c.forecast.wave(wi+offset)
             if w then
                 local weight=1/(1+offset*0.7)
@@ -123,6 +123,7 @@ function m.new(c, routes, los, spots)
         z.towers={}
         for i,t in ipairs(s.towers) do z.towers[i]=table.clone(t) end
         z.history=table.clone(s.history)
+        z.moves=table.clone(s.moves)
         return z
     end
 
@@ -191,15 +192,27 @@ function m.new(c, routes, los, spots)
             if not a then break end
             local before=calc(z.towers,wi)
             if a.price>z.cash then
+                local t=a.idx and z.towers[a.idx]
+                local partial
+                if t then
+                    partial=stats[(t.st.path1+(a.path==1 and 1 or 0))*10+t.st.path2+(a.path==2 and 1 or 0)]
+                elseif z.cash>=base.cost then
+                    partial=base
+                end
+                if partial and a.nextPrice<=z.cash then
+                    a.st=partial
+                    a.price=a.nextPrice
+                else
                 if initial and not z.first then
                     local t=a.idx and z.towers[a.idx]
-                    if t and t.id and a.nextPrice<=z.cash and before.loss>z.lives*0.15 then
-                        z.first={kind="upgrade",id=t.id,path=a.path,price=a.nextPrice,goal={path1=a.st.path1,path2=a.st.path2,price=a.price}}
+                    if t and t.id and a.nextPrice<=z.cash then
+                        z.first={kind="upgrade",id=t.id,path=a.path,price=a.nextPrice,goal={id=t.id,path=a.path,path1=a.st.path1,path2=a.st.path2,price=a.price}}
                     else
                         z.first={kind="hold",reason="reserve_package",goal={id=t and t.id,path=a.path,path1=a.st.path1,path2=a.st.path2,price=a.price,nextPrice=a.nextPrice}}
                     end
                 end
                 break
+                end
             end
             local old=a.idx and z.towers[a.idx]
             local oldSt=old and old.st
@@ -218,6 +231,7 @@ function m.new(c, routes, los, spots)
                 break
             end
             z.cash-=a.price
+            z.moves[#z.moves+1]={wave=wi,pos=c.physics.pack(a.pos),path1=a.st.path1,path2=a.st.path2,price=a.price}
             if initial and not z.first then
                 local goal={path1=a.st.path1,path2=a.st.path2,price=a.price,nextPrice=a.nextPrice,id=old and old.id}
                 z.first=old and {kind="upgrade",id=old.id,path=a.path,price=a.nextPrice,goal=goal} or {kind="place",pos=c.physics.pack(a.pos),price=base.cost,goal=goal}
@@ -227,8 +241,8 @@ function m.new(c, routes, los, spots)
 
     function x.search(s)
         local wi=math.max(1,s.wave)
-        local endWave=math.min(maxWave,wi+9)
-        local initial={towers={},cash=s.cash,lives=s.lives,cap=s.towerLimit or 40,time=0,loss=0,history={}}
+        local endWave=maxWave
+        local initial={towers={},cash=s.cash,lives=s.lives,cap=s.towerLimit or 40,time=0,loss=0,history={},moves={}}
         for id,t in pairs(s.towers) do
             if t.owned and t.type=="Ranger" then
                 local st=stats[t.path1*10+t.path2]
@@ -242,6 +256,8 @@ function m.new(c, routes, los, spots)
             local nextBeam={}
             for _,parent in ipairs(beam) do
                 for mode=0,3 do
+                    if s.cancel and s.cancel() then return nil end
+                    task.wait()
                     local z=copy(parent)
                     if n>wi then z.cash+=c.economy.bonus(n) end
                     if mode>0 then build(z,n,mode,n==wi) end
@@ -262,10 +278,13 @@ function m.new(c, routes, los, spots)
             for i=1,math.min(3,#nextBeam) do beam[i]=nextBeam[i] end
             reached=n
             task.wait()
-            if os.clock()-began>6 then break end
+            if s.cancel and s.cancel() then return nil end
         end
         local best=beam[1]
-        return best.first,{from=wi,to=reached,targetWave=endWave,time=best.time,loss=best.loss,cash=best.cash,history=best.history,score=best.score,model="aggregate",beam=3}
+        for _,z in ipairs(beam) do
+            if z.loss<z.lives and (best.loss>=best.lives or z.time<best.time) then best=z end
+        end
+        return best.first,{from=wi,to=reached,targetWave=endWave,time=best.time,loss=best.loss,cash=best.cash,history=best.history,moves=best.moves,score=best.score,model="aggregate",beam=3}
     end
 
     function x.assess(s,wi)

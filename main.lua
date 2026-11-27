@@ -32,6 +32,20 @@ local ok, err = xpcall(function()
     local executor = load("executor").new(common, reader, ctx, log)
     ctx.executor = executor
     local planner = load("planner").new(ctx)
+    local net = require(common.NetworkingHandler)
+    local enums = require(common.Enums)
+    local easy = enums.Difficulties.Easy
+    local difficultyVote = net.GetEvent("DifficultyVoteCast")
+    local difficultyReady = net.GetEvent("DifficultyVoteReady")
+    local voted = false
+    local readySent = false
+    local votes
+    local preflightMap
+    local scanning = false
+    local preflightFailedMap
+    net.GetEvent("DifficultyVoteStateUpdate"):AttachCallback(function(data)
+        votes = data
+    end)
     local elapsed = 0
     local prev
     local lastError
@@ -51,8 +65,8 @@ local ok, err = xpcall(function()
     log.record("decisions", {stage = "startup", mode = "auto", difficulty = "Easy", players = 1})
     connection = rs.Heartbeat:Connect(function(dt)
         elapsed += dt
-        if elapsed < 0.1 or busy or stopped then return end
-        elapsed %= 0.1
+        if elapsed < 0.05 or busy or stopped then return end
+        elapsed %= 0.05
         busy = true
 
         local success, problem = xpcall(function()
@@ -66,16 +80,53 @@ local ok, err = xpcall(function()
                 connection:Disconnect()
                 return
             end
-            if worker or not snap.running or snap.difficulty ~= "Easy" or snap.playerCount ~= 1 then return end
+            if snap.voting and snap.playerCount == 1 then
+                if preflightMap ~= snap.map and preflightFailedMap ~= snap.map and not scanning and snap.map and snap.spawnIndices and #snap.spawnIndices > 0 then
+                    scanning = true
+                    voted = false
+                    readySent = false
+                    task.spawn(function()
+                        local success, problem = xpcall(function()
+                            local plan = planner.preflight(snap, function()
+                                local now = state.get()
+                                return not now or now.map ~= snap.map or not now.voting
+                            end)
+                            local now = state.get()
+                            if plan and now and now.voting and now.map == snap.map and now.playerCount == 1 then
+                                log.record("forecast",{event="preflight",map=snap.map,rollout=plan})
+                                if plan.loss >= ctx.economy.config.StartingLives then
+                                    preflightFailedMap=snap.map
+                                    log.record("errors",{stage="preflight",error="no_surviving_plan",loss=plan.loss})
+                                    return
+                                end
+                                preflightMap = snap.map
+                                votes = nil
+                                voted = true
+                                difficultyVote:FireServer(easy)
+                            end
+                        end,debug.traceback)
+                        if not success then errorLog("preflight",problem) end
+                        scanning=false
+                    end)
+                elseif voted and not readySent and votes and votes.VoteMap and (votes.VoteMap[easy] or 0) >= 1 then
+                    readySent=true
+                    difficultyReady:FireServer()
+                    log.record("decisions",{event="difficulty_ready",map=snap.map,difficulty=easy})
+                end
+                return
+            end
+            if worker or scanning or not snap.running or snap.difficulty ~= "Easy" or snap.playerCount ~= 1 then return end
             worker = true
             task.spawn(function()
                 local success, problem = xpcall(function()
                     if not executor.ready(snap) then return end
-                    for _, a in ipairs(ctx.ability.rank(snap, ctx.physics)) do
-                        if executor.available(a) and executor.run(a) then return end
-                    end
                     local plan = planner.plan(snap)
                     if not plan then return end
+                    if not plan.emergency and not plan.skip.allowed and plan.recommendation.kind=="hold" then
+                        for _, a in ipairs(ctx.ability.rank(snap, ctx.physics)) do
+                            if executor.available(a) and executor.run(a) then return end
+                        end
+                    end
                     log.record("decisions", plan)
                     log.record("skip", {wave=plan.wave,revision=plan.revision,vote=executor.canSkip(snap),result=plan.skip})
                     if plan.future then log.record("forecast", {wave = plan.wave, revision = plan.revision, future = plan.future, recommendation = plan.recommendation, goal = plan.goal, rollout = plan.rollout}) end
@@ -85,7 +136,12 @@ local ok, err = xpcall(function()
                         return
                     end
                     if plan.skip.allowed and executor.run({kind = "skip", wave = snap.wave, threat = plan.skip.threat, lives = plan.skip.lives}) then return end
-                    executor.run(plan.recommendation)
+                    if executor.run(plan.recommendation) then return end
+                    if plan.emergency then
+                        for _, a in ipairs(ctx.ability.rank(snap, ctx.physics)) do
+                            if executor.available(a) and executor.run(a) then return end
+                        end
+                    end
                 end, debug.traceback)
                 if not success then errorLog("planner", problem) end
                 worker = false

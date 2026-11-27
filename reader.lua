@@ -26,6 +26,7 @@ function m.new()
     local pc = require(client:WaitForChild("PlayerClass"))
     local common = rep:WaitForChild("TDX_Shared"):WaitForChild("Common")
     local enums = require(common:WaitForChild("Enums"))
+    local util = require(common.TowerUtilities)
     local path = require(common:WaitForChild("PathHandler"))
     local team = require(common:WaitForChild("TeamUtilities"))
 
@@ -55,12 +56,16 @@ function m.new()
     function r.read()
         local g = gameClass.GetCurrentGame()
         local player = pc.GetLocalPlayerWrapper()
-        if not g or not player or not player.Stats then return end
+        if not g then return end
+        local votingNow = g:GetState() == enums.GameStates.DifficultyVoting
+        if (not player or not player.Stats) and not votingNow then return end
 
-        local stats = player.Stats
-        local teamId = team.GetLocalPlayerTeamIndex()
-        local lives = g.TeamDataTable[teamId]
-        if not lives then return end
+        local stats = player and player.Stats
+        local teamId = team.GetLocalPlayerTeamIndex() or 1
+        local lives = g.TeamDataTable and g.TeamDataTable[teamId]
+        local voting = g:GetState() == enums.GameStates.DifficultyVoting
+        if not lives and not voting then return end
+        lives = lives or {Lives = 500, TotalLives = 500}
 
         local s = {
             time = os.clock(),
@@ -68,13 +73,14 @@ function m.new()
             difficulty = g.Difficulty,
             phase = g:GetState(),
             running = g:GetState() == enums.GameStates.Running,
+            voting = voting,
             wave = g.WaveNumber,
             timeLeft = g.TimeLeft,
             speed = g:GetFinalSpeedMultiplier(),
-            cash = stats:GetCash(),
-            damage = stats.Damage,
-            kills = stats.Kills,
-            towerCount = stats.TowerCount,
+            cash = stats and stats:GetCash() or 0,
+            damage = stats and stats.Damage or 0,
+            kills = stats and stats.Kills or 0,
+            towerCount = stats and stats.TowerCount or 0,
             towerLimit = lp:GetAttribute("MaximumTowerCountPerPlayer"),
             lives = lives.Lives,
             maxLives = lives.TotalLives,
@@ -184,12 +190,13 @@ function m.new()
                     damageDealt = t.DamageDealt,
                     cashEarned = t.CashEarned,
                     cost = t.TotalCost,
+                    sellValue = math.floor(util.GetSellReturnRate(t:IsConverted(),t.BuffHandler:GetSellback()) * t.TotalCost),
                     abilities = ab
                 }
             end
         end
 
-        if s.running then
+        if s.running or s.voting then
             s.spawnIndices = table.clone(path.GetSpawnIndices(teamId) or {})
         elseif s.phase == enums.GameStates.EndScreen then
             local gui = lp:FindFirstChild("PlayerGui")

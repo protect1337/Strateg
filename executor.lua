@@ -43,7 +43,7 @@ function m.new(common, reader, ctx, log)
     local function report(a, status, reason)
         log.record("decisions", {event = "action", action = a, status = status, reason = reason})
         if status == "failed" then
-            blocked[key(a)] = os.clock() + 8
+            blocked[key(a)] = os.clock() + 1.5
             log.record("errors", {stage = "action", action = a, error = reason})
         end
     end
@@ -69,7 +69,7 @@ function m.new(common, reader, ctx, log)
                     end
                 end
             elseif a.kind == "upgrade" then
-                confirmed = t and (a.path == 1 and t.path1 or t.path2) > pending.level
+                confirmed = t and (a.path == 1 and t.path1 or t.path2) >= pending.level + (pending.levels or 1)
             elseif a.kind == "sell" then
                 confirmed = not t
             elseif a.kind == "ability" then
@@ -118,9 +118,11 @@ function m.new(common, reader, ctx, log)
                 if t:IsRebuilding() or t:IsReviving() or not t.AbilityHandler:CanUpgrade() then return false, "tower_busy" end
                 p.level = l:GetLevelOnPath(a.path)
                 if p.level >= l:GetMaxPossibleLevel(a.path) then return false, "path_locked" end
-                local cost = l:GetLevelUpgradeCost(a.path, 1, t.BuffHandler:GetDiscount(), gameClass.GetTowerCostMultiplier(t.Type), t:GetDynamicPriceScalingData())
+                local levels = math.clamp(a.levels or 1, 1, l:GetMaxPossibleLevel(a.path)-p.level)
+                local cost = l:GetLevelUpgradeCost(a.path, levels, t.BuffHandler:GetDiscount(), gameClass.GetTowerCostMultiplier(t.Type), t:GetDynamicPriceScalingData())
                 if not stats:HasCash(cost) then return false, "cash" end
-                upgrade:FireServer(t.Hash, a.path, 1)
+                p.levels=levels
+                upgrade:FireServer(t.Hash, a.path, levels)
                 return true
             elseif a.kind == "sell" then
                 if not t or t:IsRebuilding() or t:IsReviving() then return false, "tower_missing_or_busy" end
@@ -143,7 +145,7 @@ function m.new(common, reader, ctx, log)
             end
             return false, "unknown_action"
         end)
-        nextAt = os.clock() + 0.4
+        nextAt = os.clock() + 0.06
         if not ok or not accepted then
             report(a, "failed", tostring(ok and reason or accepted))
             return false
