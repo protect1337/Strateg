@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/fd28c20fd99b55cb8f42c35b88ecb0ffc7830f8c/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/747ef9631944755ef2e4452dd077a66fe2d48085/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v9","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v9 | victory search")
+    assert(ctx.strategy.version=="adaptive-v10","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v10 | victory search")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -194,7 +194,7 @@ local ok, err = xpcall(function()
                         lastDebug=snap.time
                         local a=plan.recommendation
                         local b=plan.baseline
-                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,computeMs=math.floor((os.clock()-began)*1000),targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount})
+                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,move=plan.move,computeMs=math.floor((os.clock()-began)*1000),targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount})
                     end
 
 
