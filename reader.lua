@@ -89,10 +89,15 @@ function m.new()
             towers = {}
         }
 
-        if s.running and type(timer) == "number" then
-            s.timerRemaining = math.max(0, timer - (s.time - timerAt) * (s.speed or 1))
+        if type(timer) ~= "number" and type(s.timeLeft) == "number" then
+            timer=s.timeLeft
+            timerAt=s.time
+        end
+        if (s.running or s.voting) and type(timer) == "number" then
+            local rate=s.voting and 1 or (s.speed or 1)
+            s.timerRemaining=math.max(0,timer-(s.time-timerAt)*rate)
         else
-            s.timerRemaining = s.timeLeft
+            s.timerRemaining=s.timeLeft
         end
         if s.running and wave == s.wave and age ~= nil then
             local now = s.time

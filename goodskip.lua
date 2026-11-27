@@ -5,6 +5,7 @@ function m.assess(s,c,routes,los,elapsed,spots)
     local nextWave=c.forecast.wave(wi+1)
     local current=c.forecast.wave(wi)
     if not nextWave or not current then return {allowed=false,reason="last_or_setup"} end
+    local speed=math.max(0.01,s.speed or 1)
     local delay=s.timerRemaining
     if type(delay)~="number" or delay<2 then return {allowed=false,reason="no_time_saved",delay=delay} end
     if elapsed==nil then return {allowed=false,reason="unknown_wave_age"} end
@@ -55,14 +56,14 @@ function m.assess(s,c,routes,los,elapsed,spots)
         end
         horizon=math.min(180,math.max(35,longest+delay+3))
         local live=c.forecast.scenario(s,routes,wi,elapsed,horizon,idx,true)
-        local now=c.forecast.scenario(live,routes,wi+1,-0.5,horizon,idx,true)
+        local now=c.forecast.scenario(live,routes,wi+1,-0.5*speed,horizon,idx,true)
         local later=c.forecast.scenario(live,routes,wi+1,-delay,horizon,idx,true)
         local a,b
         if best then
             a=table.clone(best)
             b=table.clone(best)
-            a.at=1.5
-            b.at=best.price<=s.cash and 1.5 or delay+1.5
+            a.at=1.5*speed
+            b.at=best.price<=s.cash and 1.5*speed or delay+1.5*speed
         end
         local fast=c.combat.run(now,routes,c.physics,los,a,horizon)
         local slow=c.combat.run(later,routes,c.physics,los,b,horizon)
@@ -79,7 +80,7 @@ function m.assess(s,c,routes,los,elapsed,spots)
     if best then
         buy={kind=best.kind,id=best.id,path=best.path,price=best.price,pos=best.pos and c.physics.pack(best.pos)}
     end
-    return {allowed=allowed,reason=allowed and "economic_skip" or "risk_or_no_gain",predictedLoss=worstLoss,waitLoss=waitLoss,saved=saved,delay=delay,bonus=bonus,purchase=buy,threat=threat,lives=s.lives,horizon=horizon}
+    return {allowed=allowed,reason=allowed and "economic_skip" or "risk_or_no_gain",predictedLoss=worstLoss,waitLoss=waitLoss,saved=saved,savedReal=saved/speed,delay=delay,bonus=bonus,purchase=buy,threat=threat,lives=s.lives,horizon=horizon}
 end
 
 return m

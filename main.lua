@@ -42,7 +42,12 @@ local ok, err = xpcall(function()
     local votes
     local preflightMap
     local scanning = false
-    local preflightFailedMap
+    local voteAt=-math.huge
+    local readyAt=-math.huge
+    local voteAttempts=0
+    local readyAttempts=0
+    local lastVoteStatus
+    local retryScanAt=0
     net.GetEvent("DifficultyVoteStateUpdate"):AttachCallback(function(data)
         votes = data
     end)
@@ -81,10 +86,13 @@ local ok, err = xpcall(function()
                 return
             end
             if snap.voting and snap.playerCount == 1 then
-                if preflightMap ~= snap.map and preflightFailedMap ~= snap.map and not scanning and snap.map and snap.spawnIndices and #snap.spawnIndices > 0 then
+                if preflightMap ~= snap.map and not scanning and snap.map and snap.spawnIndices and #snap.spawnIndices > 0 and os.clock()>=retryScanAt then
                     scanning = true
                     voted = false
                     readySent = false
+                    voteAttempts=0
+                    readyAttempts=0
+                    log.record("decisions",{event="preflight_start",map=snap.map,paths=#snap.spawnIndices,speed=snap.speed,timer=snap.timerRemaining})
                     task.spawn(function()
                         local success, problem = xpcall(function()
                             local plan = planner.preflight(snap, function()
@@ -95,23 +103,50 @@ local ok, err = xpcall(function()
                             if plan and now and now.voting and now.map == snap.map and now.playerCount == 1 then
                                 log.record("forecast",{event="preflight",map=snap.map,rollout=plan})
                                 if plan.loss >= ctx.economy.config.StartingLives then
-                                    preflightFailedMap=snap.map
-                                    log.record("errors",{stage="preflight",error="no_surviving_plan",loss=plan.loss})
-                                    return
+                                    log.record("decisions",{event="preflight_risk",loss=plan.loss,model="aggregate",note="best_plan_not_proven"})
                                 end
                                 preflightMap = snap.map
                                 votes = nil
-                                voted = true
                                 difficultyVote:FireServer(easy)
+                                voted = true
+                                voteAt=os.clock()
+                                voteAttempts=1
+                                log.record("decisions",{event="difficulty_vote_sent",map=snap.map,difficulty=easy,attempt=voteAttempts})
+                            elseif now and now.voting and now.map==snap.map then
+                                retryScanAt=os.clock()+0.5
+                                log.record("decisions",{event="preflight_incomplete",map=snap.map})
                             end
                         end,debug.traceback)
-                        if not success then errorLog("preflight",problem) end
+                        if not success then
+                            retryScanAt=os.clock()+1
+                            errorLog("preflight",problem)
+                        end
                         scanning=false
                     end)
-                elseif voted and not readySent and votes and votes.VoteMap and (votes.VoteMap[easy] or 0) >= 1 then
-                    readySent=true
-                    difficultyReady:FireServer()
-                    log.record("decisions",{event="difficulty_ready",map=snap.map,difficulty=easy})
+                elseif snap.map and preflightMap==snap.map then
+                    local confirmed=votes and votes.VoteMap and (votes.VoteMap[easy] or 0)>=1
+                    if not confirmed and os.clock()-voteAt>=0.75 and voteAttempts<4 then
+                        difficultyVote:FireServer(easy)
+                        voted=true
+                        voteAt=os.clock()
+                        voteAttempts+=1
+                        log.record("decisions",{event="difficulty_vote_retry",attempt=voteAttempts})
+                    elseif confirmed and not readySent then
+                        difficultyReady:FireServer()
+                        readySent=true
+                        readyAt=os.clock()
+                        readyAttempts=1
+                        log.record("decisions",{event="difficulty_ready_sent",map=snap.map,difficulty=easy})
+                    elseif confirmed and readySent and votes.ReadyCount==0 and os.clock()-readyAt>=1 and readyAttempts<3 then
+                        difficultyReady:FireServer()
+                        readyAt=os.clock()
+                        readyAttempts+=1
+                    end
+                end
+                local status=scanning and "scanning" or snap.map and preflightMap==snap.map and (readySent and "ready_sent" or "waiting_vote") or "waiting_map"
+                if status~=lastVoteStatus then
+                    lastVoteStatus=status
+                    log.record("decisions",{event="voting_state",status=status,map=snap.map,paths=snap.spawnIndices and #snap.spawnIndices or 0,timer=snap.timerRemaining})
                 end
                 return
             end

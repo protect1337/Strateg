@@ -245,7 +245,7 @@ function m.new(c)
             trial.towers=table.clone(sim.towers)
             for _,v in ipairs(sold) do trial.towers[v.id]=nil end
             local action=table.clone(a)
-            action.at+=#sold*0.45
+            action.at=(action.at+#sold*0.45)*(s.speed or 1)
             local r=c.combat.run(trial,routes,c.physics,los,action,h)
             local remaining=r.leaks+r.unknown
             local gain=loss-remaining

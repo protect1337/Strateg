@@ -257,15 +257,17 @@ function m.new(c, routes, los, spots)
             for _,parent in ipairs(beam) do
                 for mode=0,3 do
                     if s.cancel and s.cancel() then return nil end
-                    task.wait()
+                    if mode==0 then task.wait() end
                     local z=copy(parent)
-                    if n>wi then z.cash+=c.economy.bonus(n) end
+                    if n>wi or n==wi and s.wave==0 then z.cash+=c.economy.bonus(n) end
                     if mode>0 then build(z,n,mode,n==wi) end
                     if n==wi and not z.first then z.first={kind="hold",reason="reserve"} end
                     local r=calc(z.towers,n)
                     local scale=n==wi and s.wave>0 and s.waveAge and math.clamp(1-s.waveAge/math.max(1,r.time),0.15,1) or 1
                     z.cash+=r.earned*scale
-                    if n==wi and s.wave==0 then z.cash+=c.economy.bonus(n) end
+                    if mode>0 and r.earned*scale>=250 and n==wi then
+                        build(z,n,mode,false)
+                    end
                     z.time+=r.time*scale
                     z.loss+=r.loss*scale
                     z.history[#z.history+1]={wave=n,loss=r.loss,time=r.time,cash=z.cash,towers=#z.towers,mode=mode}
@@ -284,7 +286,7 @@ function m.new(c, routes, los, spots)
         for _,z in ipairs(beam) do
             if z.loss<z.lives and (best.loss>=best.lives or z.time<best.time) then best=z end
         end
-        return best.first,{from=wi,to=reached,targetWave=endWave,time=best.time,loss=best.loss,cash=best.cash,history=best.history,moves=best.moves,score=best.score,model="aggregate",beam=3}
+        return best.first,{from=wi,to=reached,targetWave=endWave,time=best.time,loss=best.loss,cash=best.cash,history=best.history,moves=best.moves,score=best.score,model="aggregate",beam=3,realTime=best.time/math.max(0.01,s.speed or 1),computeTime=os.clock()-began}
     end
 
     function x.assess(s,wi)
