@@ -66,7 +66,12 @@ function m.new(c)
             end
         end
         table.sort(data.events, function(a,b) return a.at < b.at end)
+        table.sort(data.groups, function(a,b) return a.first < b.first end)
         waves[wi] = data
+    end
+
+    function f.wave(n)
+        return waves[n]
     end
 
     function f.children(name)
@@ -117,7 +122,7 @@ function m.new(c)
     function f.value(stats, pos, routes, exposure, wi)
         local value = 0
         local norm = 0
-        for offset = 0, 3 do
+        for offset = 0, 9 do
             local w = waves[wi + offset]
             if w then
                 local weight = 1 / (1 + offset * 0.65)

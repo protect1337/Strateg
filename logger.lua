@@ -1,6 +1,6 @@
 local hs = game:GetService("HttpService")
 local m = {}
-local names = {"decisions", "errors", "progress", "shield", "economy", "grenade", "burn", "burst", "forecast"}
+local names = {"decisions", "errors", "progress", "shield", "economy", "grenade", "burn", "burst", "forecast", "skip"}
 
 function m.new()
     local root = "LOGS"
@@ -8,7 +8,7 @@ function m.new()
     local folders = {
         decisions = "plan", errors = "errors", progress = "winrate",
         shield = "damage", economy = "economy", grenade = "grenade",
-        burn = "burn", burst = "burst", forecast = "forecast"
+        burn = "burn", burst = "burst", forecast = "forecast", skip = "skip"
     }
     local files = {}
     if not isfolder(root) then makefolder(root) end
@@ -44,7 +44,7 @@ function m.new()
             for _ in pairs(s.enemies) do count += 1 end
             l.record("progress", {
                 revision = s.revision, map = s.map, wave = s.wave, phase = s.phase,
-                timeLeft = s.timeLeft, cash = s.cash, lives = s.lives,
+                timeLeft = s.timerRemaining or s.timeLeft, speed = s.speed, cash = s.cash, lives = s.lives,
                 enemies = count, towers = s.towerCount, damage = s.damage, kills = s.kills
             })
         end
@@ -77,15 +77,18 @@ function m.new()
         if #changes > 0 then
             l.record("shield", {wave = s.wave, event = "hp_delta", changes = changes, damageDelta = s.damage - prev.damage, observation = "sample_delta"})
         end
-        if s.cash ~= prev.cash or #changes > 0 then
+        if s.cash ~= prev.cash or s.damage ~= prev.damage or s.kills ~= prev.kills or #changes > 0 then
             l.record("economy", {wave = s.wave, players = s.playerCount, cashBefore = prev.cash, cashAfter = s.cash, damageDelta = s.damage - prev.damage, killsDelta = s.kills - prev.kills, changes = changes, observation = "sample_delta"})
         end
 
         for id, t in pairs(s.towers) do
             local old = prev.towers[id]
+            if not old or old.path1 ~= t.path1 or old.path2 ~= t.path2 or old.damageDealt ~= t.damageDealt then
+                l.record("burst", {event = "tower_stats", wave = s.wave, tower = id, pos = t.pos, path1 = t.path1, path2 = t.path2, damageDealt = t.damageDealt, damageDelta = old and t.damageDealt - old.damageDealt, cashEarned = t.cashEarned})
+            end
             if old and t.type == "Ranger" then
                 if old.target ~= t.target or old.burstIndex ~= t.burstIndex then
-                    l.record("burst", {wave = s.wave, tower = id, targetBefore = old.target, targetAfter = t.target, indexBefore = old.burstIndex, indexAfter = t.burstIndex, resetBefore = old.burstReset, resetAfter = t.burstReset, reload = t.reload, observation = "client_index"})
+                    l.record("burst", {wave = s.wave, tower = id, targetBefore = old.target, targetAfter = t.target, indexBefore = old.burstIndex, indexAfter = t.burstIndex, resetBefore = old.burstReset, resetAfter = t.burstReset, reload = t.reload, speed = s.speed, path1 = t.path1, path2 = t.path2, damage = t.damage, burstSize = t.burstSize, observation = "client_index"})
                 end
                 for name, a in pairs(t.abilities) do
                     local prior = old.abilities[name]

@@ -1,78 +1,85 @@
 local m = {}
 
-function m.lastSpawn(w)
-    local last = 0
-    for _, seq in ipairs(w and w.SpawnSequences or {}) do
-        last = math.max(last, (seq.StartDelay or 0) + math.max(0, (seq.Count or 0) - 1) * (seq.Interval or 0))
+function m.assess(s,c,routes,los,elapsed,spots)
+    local wi=s.wave
+    local nextWave=c.forecast.wave(wi+1)
+    local current=c.forecast.wave(wi)
+    if not nextWave or not current then return {allowed=false,reason="last_or_setup"} end
+    local delay=s.timerRemaining
+    if type(delay)~="number" or delay<2 then return {allowed=false,reason="no_time_saved",delay=delay} end
+    if elapsed==nil then return {allowed=false,reason="unknown_wave_age"} end
+    if current.unknown>0 or nextWave.unknown>0 then return {allowed=false,reason="unknown_enemy"} end
+    local bonus=c.economy.bonus(wi+1)
+    local best
+    local score=0
+    local function consider(a,st,pos,old)
+        if a.price>s.cash+bonus then return end
+        local gain=st.dps-(old and old.dps or 0)
+        if st.ignoreResistance and not (old and old.ignoreResistance) and nextWave.armorHp>0 then gain+=st.dps*0.8 end
+        if st.stealthDetection and not (old and old.stealthDetection) and nextWave.stealthHp>0 then gain+=st.dps*2 end
+        if st.path2>=4 and (not old or old.path2<st.path2) then gain+=8 end
+        local early=math.huge
+        for _,r in pairs(routes) do
+            for d=0,r.length,4 do
+                local p=c.physics.at(r,d)
+                if (p-pos).Magnitude<=st.range and los(pos,p) then early=math.min(early,d) break end
+            end
+        end
+        local rank=gain/(1+early/18)/math.max(1,a.price)^0.65
+        if rank>score then score=rank best=a end
     end
-    return last
-end
-
-function m.preview(s, wave, routes, c)
-    if not wave then return end
-    local shortest
-    local index
-    for idx, route in pairs(routes) do
-        if not shortest or route.length < shortest.length then
-            shortest = route
-            index = idx
+    for id,t in pairs(s.towers) do
+        if t.owned and t.type=="Ranger" then
+            local old=c.ranger.stats(t.path1,t.path2)
+            for _,u in ipairs(c.ranger.upgrades(t)) do
+                consider({kind="upgrade",id=id,path=u.path,stats=u,price=u.price},u,c.physics.vec(t.pos),old)
+            end
         end
     end
-    if not shortest then return end
-    local copy = table.clone(s)
-    copy.enemies = table.clone(s.enemies)
-    local start = c.physics.pack(shortest.points[1])
-    local horizon = 0
-    local count = 0
-    local complex = false
-    for _, seq in ipairs(wave.SpawnSequences or {}) do
-        local cfg = c.resources.GetEnemyConfig(seq.EnemyType)
-        if not cfg or type(cfg.Health) ~= "number" or type(cfg.Speed) ~= "number" or cfg.Speed <= 0 then return end
-        local override = cfg.DifficultyToStatOverrideMap and cfg.DifficultyToStatOverrideMap[s.difficulty]
-        if override then complex = true end
-        if cfg.AbilityNames or cfg.DeathAbilityNames or cfg.SecondLifeData or cfg.DeathSpawnData then complex = true end
-        local hp = cfg.Health * (1 + (seq.AdditionalHealthMultiplier or 0))
-        local shield = (cfg.Shield or 0) + cfg.Health * (seq.AdditionalShieldMultiplier or 0)
-        local resist = {}
-        for _, item in pairs(cfg.DamageReductionTable or {}) do
-            resist[tostring(item.DamageType)] = item.DamageReduction
-        end
-        for i = 1, seq.Count or 0 do
-            count += 1
-            if count > 300 then return end
-            local at = (seq.StartDelay or 0) + (i - 1) * (seq.Interval or 0)
-            local id = "future_" .. count
-            copy.enemies[id] = {
-                id = id, type = seq.EnemyType, hp = hp, shield = shield,
-                pos = start, pathPos = start, pathIndex = index, speed = cfg.Speed,
-                spawnAt = at, stealth = seq.Stealth or cfg.Stealth,
-                air = cfg.AirUnit, resist = resist, maxDamage = cfg.MaximumDamage,
-                allReduction = cfg.AllDamageReduction
-            }
-            horizon = math.max(horizon, at + shortest.length / cfg.Speed + 1)
+    if s.towerCount<(s.towerLimit or 0) then
+        local st=c.ranger.stats(0,0)
+        for i=1,math.min(3,#spots) do
+            local p=spots[i].pos
+            consider({kind="place",pos=p,stats=st,price=st.cost},st,p)
         end
     end
-    if count == 0 then return end
-    return copy, math.min(100, horizon), complex, horizon <= 100
-end
-
-function m.assess(s, c, routes, los, elapsed)
-    local current = c.economy.config.Waves[s.wave]
-    local nextWave = c.economy.config.Waves[s.wave + 1]
-    if not nextWave then return {allowed = false, reason = "last_wave"} end
-    if not current or not elapsed or elapsed < m.lastSpawn(current) + 2 then
-        return {allowed = false, reason = "spawn_window"}
+    local threat=0
+    for _,e in pairs(s.enemies) do threat+=e.hp+(e.shield or 0) end
+    local reserve=math.max(20,s.lives*0.20)
+    local horizon=0
+    local worstLoss,waitLoss,winTime,waitTime=0,0,0,0
+    for idx,r in pairs(routes) do
+        local longest=0
+        for _,g in ipairs(nextWave.groups) do
+            longest=math.max(longest,g.last+r.length/math.max(0.1,g.speed))
+        end
+        horizon=math.min(180,math.max(35,longest+delay+3))
+        local live=c.forecast.scenario(s,routes,wi,elapsed,horizon,idx,true)
+        local now=c.forecast.scenario(live,routes,wi+1,-0.5,horizon,idx,true)
+        local later=c.forecast.scenario(live,routes,wi+1,-delay,horizon,idx,true)
+        local a,b
+        if best then
+            a=table.clone(best)
+            b=table.clone(best)
+            a.at=1.5
+            b.at=best.price<=s.cash and 1.5 or delay+1.5
+        end
+        local fast=c.combat.run(now,routes,c.physics,los,a,horizon)
+        local slow=c.combat.run(later,routes,c.physics,los,b,horizon)
+        local risk=nextWave.complex and 1.35 or 1.15
+        worstLoss=math.max(worstLoss,(fast.leaks+fast.remaining+fast.remainingShield+fast.unknown)*risk)
+        waitLoss=math.max(waitLoss,slow.leaks+slow.remaining+slow.remainingShield+slow.unknown)
+        winTime=math.max(winTime,fast.finish)
+        waitTime=math.max(waitTime,slow.finish)
+        if worstLoss>=s.lives-reserve then break end
     end
-    if #s.spawnIndices ~= 1 then return {allowed = false, reason = "multiple_paths"} end
-    if (s.timeLeft or 0) <= 1 then return {allowed = false, reason = "no_time_saved"} end
-    local preview, horizon, complex, complete = m.preview(s, nextWave, routes, c)
-    if not preview or complex or not complete then return {allowed = false, reason = "uncertain_wave"} end
-    local res = c.combat.run(preview, routes, c.physics, los, nil, horizon)
-    local reserve = math.max(20, (s.maxLives or s.lives) * 0.12)
-    local loss = res.leaks + res.remaining
-    local threat = 0
-    for _, e in pairs(s.enemies) do threat += e.hp + (e.shield or 0) end
-    return {allowed = s.lives - loss * 1.5 > reserve, reason = "next_wave_forecast", predictedLoss = loss, reserve = reserve, horizon = horizon, threat = threat, lives = s.lives}
+    local saved=waitTime-winTime
+    local allowed=worstLoss<s.lives-reserve and (saved>0.8 or worstLoss+5<waitLoss) and worstLoss<=waitLoss+math.max(15,s.lives*0.12)
+    local buy
+    if best then
+        buy={kind=best.kind,id=best.id,path=best.path,price=best.price,pos=best.pos and c.physics.pack(best.pos)}
+    end
+    return {allowed=allowed,reason=allowed and "economic_skip" or "risk_or_no_gain",predictedLoss=worstLoss,waitLoss=waitLoss,saved=saved,delay=delay,bonus=bonus,purchase=buy,threat=threat,lives=s.lives,horizon=horizon}
 end
 
 return m

@@ -11,7 +11,7 @@ function m.candidates(routes, physics, placement, ranger, team, snapshot, los)
         local points = {}
         local step = math.max(3, r.length / 80)
         for d = 0, r.length, step do
-            table.insert(points, {pos = physics.at(r,d), weight = 1.15 - 0.3 * d / r.length, step = step})
+            table.insert(points, {pos = physics.at(r,d), weight = 1 / (1 + d / 24)^2, step = step})
         end
         table.insert(samples, points)
     end
@@ -34,16 +34,20 @@ function m.candidates(routes, physics, placement, ranger, team, snapshot, los)
                         if placement.Check(pos,ranger.config,team) then
                             local score = 0
                             local upgraded = 0
+                            local first = math.huge
                             for _, points in ipairs(samples) do
                                 for _, q in ipairs(points) do
                                     local dist = (q.pos - pos).Magnitude
                                     if dist <= 14 and los(pos,q.pos) then
-                                        if dist <= 9 then score += q.step * q.weight end
+                                        if dist <= 9 then
+                                            score += q.step * q.weight
+                                            first = math.min(first, 24 * (1 / math.sqrt(q.weight) - 1))
+                                        end
                                         upgraded += q.step * q.weight
                                     end
                                 end
                             end
-                            if score > 0 then table.insert(out,{pos=pos,coverage=score + upgraded * 0.2}) end
+                            if score > 0 then table.insert(out,{pos=pos,coverage=score + upgraded * 0.12, first=first}) end
                         end
                     end
                 end

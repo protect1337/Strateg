@@ -27,6 +27,7 @@ local ok, err = xpcall(function()
         placementHandler = require(common.PlacementHandler)
     }
     ctx.forecast = load("forecast").new(ctx)
+    ctx.strategy = load("strategy")
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
     ctx.executor = executor
@@ -76,9 +77,13 @@ local ok, err = xpcall(function()
                     local plan = planner.plan(snap)
                     if not plan then return end
                     log.record("decisions", plan)
-                    if plan.future then log.record("forecast", {wave = plan.wave, revision = plan.revision, future = plan.future, recommendation = plan.recommendation, goal = plan.goal}) end
+                    log.record("skip", {wave=plan.wave,revision=plan.revision,vote=executor.canSkip(snap),result=plan.skip})
+                    if plan.future then log.record("forecast", {wave = plan.wave, revision = plan.revision, future = plan.future, recommendation = plan.recommendation, goal = plan.goal, rollout = plan.rollout}) end
                     local now = state.get()
-                    if stopped or not now or now.map ~= snap.map or now.wave ~= snap.wave or now.time - snap.time > 8 then return end
+                    if stopped or not now or now.map ~= snap.map or now.wave ~= snap.wave or now.time - snap.time > 12 then
+                        log.record("decisions", {event="stale_plan",wave=snap.wave,revision=snap.revision,age=now and now.time-snap.time})
+                        return
+                    end
                     if plan.skip.allowed and executor.run({kind = "skip", wave = snap.wave, threat = plan.skip.threat, lives = plan.skip.lives}) then return end
                     executor.run(plan.recommendation)
                 end, debug.traceback)

@@ -1,183 +1,249 @@
 local m = {}
 
 function m.new(c)
-    local p = {}
-    local cached, routes, los, mapName, lastCount, pathKey
-    local last = -math.huge
-    local lastWave
-    local future
-    local exposureCache = {}
-    local lastSkip = -math.huge
-    local statsAll = c.ranger.all()
+    local p={}
+    local routes,los,mapKey,spots,search
+    local last=-math.huge
+    local lastSkip=-math.huge
+    local lastSearch=-math.huge
+    local lastWave,lastCash,lastCount
+    local macro,rollout,queued,reservation
+    local scans=0
+
+    local function prepare(s)
+        local key=tostring(s.map)..":"..table.concat(s.spawnIndices or {},",")
+        local team=c.team.GetLocalPlayerTeamIndex()
+        if key~=mapKey then
+            mapKey=key
+            routes=c.physics.routes(c.path,team,s.spawnIndices)
+            if not next(routes) then mapKey=nil return false end
+            los=c.physics.los(c.map)
+            spots=c.placement.candidates(routes,c.physics,c.placementHandler,c.ranger,team,s,los)
+            search=c.strategy.new(c,routes,los,spots)
+            scans=s.towerCount
+            macro=nil
+            queued=nil
+            reservation=nil
+        elseif s.towerCount>=scans+6 or s.towerCount<scans then
+            spots=c.placement.candidates(routes,c.physics,c.placementHandler,c.ranger,team,s,los)
+            search=c.strategy.new(c,routes,los,spots)
+            scans=s.towerCount
+            macro=nil
+        end
+        return routes~=nil
+    end
+
+    local function valid(a,s)
+        if not a or a.kind=="hold" then return false end
+        if not c.executor.available(a) or (a.price or 0)>s.cash then return false end
+        if a.kind=="upgrade" then
+            local t=s.towers[a.id]
+            if not t then return false end
+            for _,u in ipairs(c.ranger.upgrades(t)) do
+                if u.path==a.path and u.price<=s.cash then return true end
+            end
+        elseif a.kind=="place" then
+            return s.towerCount<(s.towerLimit or 0) and c.placementHandler.Check(c.physics.vec(a.pos),c.ranger.config,c.team.GetLocalPlayerTeamIndex())
+        end
+        return false
+    end
+
+    local function action(a,s)
+        if not valid(a,s) then return end
+        if a.kind=="upgrade" then
+            for _,u in ipairs(c.ranger.upgrades(s.towers[a.id])) do
+                if u.path==a.path then return {kind="upgrade",id=a.id,path=a.path,price=u.price,stats=u,at=0.5} end
+            end
+        elseif a.kind=="place" then
+            return {kind="place",pos=c.physics.vec(a.pos),stats=c.ranger.stats(0,0),price=a.price,at=0.5}
+        end
+    end
 
     function p.plan(s)
-        if not s.running or s.difficulty ~= "Easy" or s.playerCount ~= 1 or not s.wave then return end
-        if s.time - last < 1.5 then return end
-        last = s.time
-        local team = c.team.GetLocalPlayerTeamIndex()
-        local ids = table.clone(s.spawnIndices or {})
-        table.sort(ids)
-        local k = table.concat(ids, ",")
-        if mapName ~= s.map or pathKey ~= k then
-            cached, routes, los = nil, nil, nil
-            exposureCache = {}
-            mapName, pathKey = s.map, k
+        if not s.running or s.difficulty~="Easy" or s.playerCount~=1 or not s.wave then return end
+        if s.time-last<1.0 then return end
+        last=s.time
+        if not prepare(s) then return end
+        local wi=math.max(1,s.wave)
+        local index,short
+        for idx,r in pairs(routes) do
+            if not short or r.length<short then short=r.length index=idx end
         end
-        if not routes then
-            routes = c.physics.routes(c.path, team, ids)
-            if not next(routes) then routes = nil return end
-            los = c.physics.los(c.map)
+        local w=c.forecast.wave(wi)
+        if not w then return end
+        local horizon=35
+        local scenario=s
+        if s.wave==0 then
+            scenario=c.forecast.scenario(s,routes,1,-(s.timerRemaining or 0),horizon,index,true)
+        elseif s.waveAge~=nil then
+            scenario=c.forecast.scenario(s,routes,wi,s.waveAge,horizon,index,true)
         end
-        if not cached or lastCount ~= s.towerCount then
-            cached = c.placement.candidates(routes, c.physics, c.placementHandler, c.ranger, team, s, los)
-            lastCount = s.towerCount
+        local prepared=table.clone(scenario)
+        prepared.enemies={}
+        for id,e in pairs(scenario.enemies) do
+            local v=table.clone(e)
+            if not v.kids then v.kids=c.forecast.children(e.type) end
+            prepared.enemies[id]=v
         end
-        if lastWave ~= s.wave then
-            lastWave = s.wave
-            future = c.forecast.future(math.max(1, s.wave))
-        end
-        local wi = math.max(1, s.wave)
-        local shortest, index
-        for idx, r in pairs(routes) do
-            if not shortest or r.length < shortest.length then shortest, index = r, idx end
-        end
-        local function exposure(pos, range)
-            local key = string.format("%.2f:%.2f:%.2f:%.2f", pos.X, pos.Y, pos.Z, range)
-            if exposureCache[key] ~= nil then return exposureCache[key] end
-            local min = math.huge
-            local sum, n = 0, 0
-            for _, r in pairs(routes) do
-                local covered = 0
-                for d = 0, r.length, 2 do
-                    local q = c.physics.at(r, d)
-                    if (q - pos).Magnitude <= range and los(pos, q) then covered += math.min(2, r.length - d) end
+        scenario=prepared
+        local base=c.combat.run(scenario,routes,c.physics,los,nil,horizon)
+        local skip={allowed=false,reason="vote_unavailable"}
+        if c.executor.canSkip(s) then
+            if s.time-lastSkip>=2.5 then
+                lastSkip=s.time
+                skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots)
+                if skip.allowed then
+                    queued=skip.purchase and {wave=s.wave+1,action=skip.purchase}
+                    return {wave=s.wave,revision=s.revision,baseline=base,recommendation={kind="hold"},skip=skip,mode="auto",future=c.forecast.future(wi),rollout=rollout}
                 end
-                min = math.min(min, covered)
-                sum += covered
-                n += 1
+            else
+                skip.reason="evaluation_cooldown"
             end
-            exposureCache[key] = n == 0 and 0 or (sum / n * 0.8 + min * 0.2)
-            return exposureCache[key]
         end
-        local values = {}
-        local function val(st, pos)
-            local key = string.format("%.2f:%.2f:%.2f:%d:%d", pos.X, pos.Y, pos.Z, st.path1, st.path2)
-            if values[key] == nil then values[key] = c.forecast.value(st, pos, routes, exposure, wi) end
-            return values[key]
+        if queued and s.wave>=queued.wave then
+            local a=queued.action
+            queued=nil
+            if valid(a,s) then
+                return {wave=s.wave,revision=s.revision,baseline=base,recommendation=a,skip=skip,mode="auto",goal=a,rollout=rollout}
+            end
         end
-        local horizon = 22
-        local scenario = s
-        if s.waveAge ~= nil then
-            scenario = c.forecast.scenario(s, routes, wi, s.waveAge, horizon, index, true)
-        elseif s.wave == 0 then
-            scenario = c.forecast.scenario(s, routes, 1, -(s.timeLeft or 0) - 0.3, horizon, index, true)
+        local recalc=not macro or s.wave~=lastWave or s.towerCount~=lastCount or s.cash>=(lastCash or 0)+math.max(100,0.12*(lastCash or 0)) or s.cash<(lastCash or 0)-0.1
+        if recalc or s.time-lastSearch>=7 then
+            local t=os.clock()
+            macro,rollout=search.search(s)
+            rollout.computeTime=os.clock()-t
+            lastSearch=s.time
+            lastWave,lastCash,lastCount=s.wave,s.cash,s.towerCount
         end
-        local prepared = table.clone(scenario)
-        prepared.enemies = {}
-        for id, e in pairs(scenario.enemies) do
-            local item = table.clone(e)
-            if not item.kids then item.kids = c.forecast.children(e.type) end
-            prepared.enemies[id] = item
+        local best=macro or {kind="hold",reason="no_plan"}
+        if reservation then
+            local t=s.towers[reservation.id]
+            if not t or t.path1>=reservation.path1 and t.path2>=reservation.path2 or s.wave>reservation.wave+2 then
+                reservation=nil
+            else
+                local wanted
+                for _,u in ipairs(c.ranger.upgrades(t)) do
+                    if u.path==1 and u.path1<=reservation.path1 or u.path==2 and u.path2<=reservation.path2 then
+                        if not wanted or u.path==reservation.path then wanted=u end
+                    end
+                end
+                if wanted then
+                    if wanted.price<=s.cash then
+                        best={kind="upgrade",id=t.id,path=wanted.path,price=wanted.price,goal=reservation,reason="committed_package"}
+                    else
+                        best={kind="hold",reason="reserve_package",goal=reservation}
+                    end
+                else
+                    reservation=nil
+                end
+            end
         end
-        scenario = prepared
-        local base = c.combat.run(scenario, routes, c.physics, los, nil, horizon)
-        local rs = c.ranger.stats(0, 0)
-        local candidates = {}
-        local goals = {}
-        local totalValue = 0
-        local stealthValue = 0
-        local cap = s.towerLimit or 0
-        local function put(a)
-            local key = {kind = a.kind, id = a.id, path = a.path, pos = a.pos and c.physics.pack(a.pos)}
-            if not c.executor.available(key) then return end
-            table.insert(candidates, a)
+        local selected=action(best,s)
+        local chosen=selected and c.combat.run(scenario,routes,c.physics,los,selected,horizon) or base
+        local function merit(r)
+            local killGain=r.kills-base.kills
+            local finishGain=base.finish-r.finish
+            local cashGain=c.economy.income(wi,r.cashDamage-base.cashDamage)
+            local speedGain=(base.killTime-r.killTime)/math.max(1,r.kills+base.kills)
+            return (base.leaks-r.leaks)*18+(base.remaining-r.remaining)*0.45+(r.shieldDamage-base.shieldDamage)*0.1+killGain*5+finishGain*3+cashGain*0.4+speedGain
         end
-        for id, t in pairs(s.towers) do
-            if t.owned and t.type == "Ranger" then
-                local pos = c.physics.vec(t.pos)
-                local old = c.ranger.stats(t.path1, t.path2)
-                local v = val(old, pos)
-                totalValue += v
-                if old.stealthDetection then stealthValue += v end
-                local ups = c.ranger.upgrades(t)
-                for _, u in ipairs(ups) do
-                    local bestPackage = 0
-                    local goal
-                    for _, target in ipairs(statsAll) do
-                        if target.path1 >= u.path1 and target.path2 >= u.path2 and target.cost > old.cost then
-                            local gain = math.max(0, val(target, pos) - v)
-                            local price = target.cost - old.cost
-                            local rate = gain / math.max(1, price)
-                            if rate > bestPackage then
-                                bestPackage = rate
-                                goal = {id = id, path = u.path, path1 = target.path1, path2 = target.path2, price = price, nextPrice = u.price, value = gain}
+        local emergency=base.leaks+base.unknown>math.max(12,s.lives*0.12)
+        local rescue
+        if emergency or not selected and not next(s.towers) then
+            local options={}
+            for id,t in pairs(s.towers) do
+                if t.owned and t.type=="Ranger" then
+                    local old=c.ranger.stats(t.path1,t.path2)
+                    for _,u in ipairs(c.ranger.upgrades(t)) do
+                        if u.price<=s.cash then
+                            local rank=(u.dps-old.dps)/math.max(1,u.price)
+                            if u.stealthDetection and not old.stealthDetection then rank+=0.1 end
+                            if u.ignoreResistance and not old.ignoreResistance then rank+=0.05 end
+                            table.insert(options,{kind="upgrade",id=id,path=u.path,price=u.price,rank=rank})
+                        end
+                    end
+                end
+            end
+            table.sort(options,function(a,b) return a.rank>b.rank end)
+            for i=1,math.min(8,#options) do
+                local a=options[i]
+                local b=action(a,s)
+                if b then
+                    local r=c.combat.run(scenario,routes,c.physics,los,b,horizon)
+                    local v=merit(r)
+                    if v>math.max(0,merit(chosen)) and (not rescue or v>rescue.value) then rescue={a=a,r=r,value=v} end
+                end
+            end
+            if s.towerCount<(s.towerLimit or 0) and s.cash>=250 then
+                local n=0
+                for _,item in ipairs(spots) do
+                    local a={kind="place",pos=c.physics.pack(item.pos),price=250}
+                    local b=action(a,s)
+                    if b then
+                        n+=1
+                        local r=c.combat.run(scenario,routes,c.physics,los,b,horizon)
+                        local v=merit(r)
+                        if v>math.max(0,merit(chosen)) and (not rescue or v>rescue.value) then rescue={a=a,r=r,value=v} end
+                        if n>=4 then break end
+                    end
+                end
+            end
+        end
+        if rescue then
+            best,chosen=rescue.a,rescue.r
+            best.reason="immediate_threat"
+        elseif not selected then
+            best={kind="hold",reason=best.reason or "reserve",goal=best.goal}
+        elseif best.kind=="place" and s.towerCount>=2 and merit(chosen)<=0 and (not rollout or rollout.loss>0) and not emergency then
+            best={kind="hold",reason="avoid_idle_tower",goal=best.goal}
+        elseif emergency and merit(chosen)<=0 then
+            best={kind="hold",reason="reserve_under_threat",goal=best.goal}
+        end
+        if best.kind=="hold" and not reservation and not next(s.enemies) and s.towerCount>=(s.towerLimit or math.huge) and s.cash>=250 then
+            local st=c.ranger.stats(0,0)
+            for id,t in pairs(s.towers) do
+                if t.owned and t.type=="Ranger" and t.path1==0 and t.path2==0 then
+                    for i=1,math.min(4,#spots) do
+                        local item=spots[i]
+                        if c.placementHandler.Check(item.pos,c.ranger.config,c.team.GetLocalPlayerTeamIndex()) then
+                            local sim=table.clone(scenario)
+                            sim.towers=table.clone(scenario.towers)
+                            sim.towers[id]=nil
+                            local replacement=c.combat.run(sim,routes,c.physics,los,{kind="place",pos=item.pos,stats=st,at=1},horizon)
+                            if merit(replacement)>5 and replacement.leaks<=base.leaks then
+                                local a={kind="sell",id=id,reason="replacement_improves_combat"}
+                                if c.executor.available(a) then
+                                    best=a
+                                    chosen=replacement
+                                    break
+                                end
                             end
                         end
                     end
-                    if goal then
-                        goal.priority = bestPackage
-                        table.insert(goals, goal)
+                end
+                if best.kind=="sell" then break end
+            end
+        end
+        if best.goal and best.goal.id and best.goal.path1 and best.goal.path2 and not rescue then
+            local t=s.towers[best.goal.id]
+            if t and (t.path1<best.goal.path1 or t.path2<best.goal.path2) then
+                local target=c.ranger.stats(best.goal.path1,best.goal.path2)
+                local old=c.ranger.stats(t.path1,t.path2)
+                local remaining=target.cost-old.cost
+                if remaining>0 and (best.kind=="upgrade" or best.kind=="hold" and best.reason=="reserve_package") then
+                    if not reservation then
+                        reservation=table.clone(best.goal)
+                        reservation.wave=s.wave
                     end
-                    if c.economy.afford(s, u.price) then
-                        local gain = math.max(0, val(u, pos) - v)
-                        put({kind = "upgrade", id = id, path = u.path, stats = u, price = u.price, priority = gain / math.max(1,u.price) + bestPackage * 0.7, strategic = gain, goal = goal})
-                    end
                 end
             end
+        elseif rescue then
+            reservation=nil
         end
-        table.sort(goals, function(a,b) return a.priority > b.priority end)
-        if s.towerCount < cap and c.economy.afford(s, rs.cost) then
-            local places = {}
-            for _, item in ipairs(cached) do
-                local v = val(rs, item.pos)
-                local coverage = exposure(item.pos, rs.range)
-                if coverage > 0 then
-                    table.insert(places, {kind = "place", pos = item.pos, stats = rs, price = rs.cost, strategic = v, priority = v / rs.cost, coverage = coverage})
-                end
-            end
-            table.sort(places, function(a,b) return a.priority > b.priority end)
-            for i = 1, math.min(6,#places) do
-                local a = places[i]
-                if c.placementHandler.Check(a.pos, c.ranger.config, team) then put(a) end
-            end
-        end
-        table.sort(candidates, function(a,b) return a.priority > b.priority end)
-        local best, score
-        score = 0
-        local pressure = math.max(1, c.forecast.pressure(wi))
-        local emergency = base.leaks > math.max(0, s.lives * 0.15)
-        local goal = goals[1]
-        local save = goal and goal.nextPrice > s.cash and not emergency and totalValue > 0.55
-        for i = 1, math.min(8,#candidates) do
-            local a = candidates[i]
-            local res = c.combat.run(scenario, routes, c.physics, los, a, horizon)
-            local income = c.economy.income(wi, res.cashDamage) - c.economy.income(wi, base.cashDamage)
-            local gain = res.hpDamage - base.hpDamage + (res.shieldDamage - base.shieldDamage) * 0.5 + (base.leaks - res.leaks) * 5 + (base.remaining - res.remaining) * 0.2 + income * 0.4
-            local merit = gain / pressure / math.max(1,a.price) + a.priority * (emergency and 0.2 or 1.2)
-            if save and gain <= 0 and a.price > s.cash * 0.2 then merit = 0 end
-            if res.leaks >= s.lives and base.leaks < s.lives then merit = 0 end
-            if merit > score then
-                score = merit
-                best = {kind = a.kind, id = a.id, path = a.path, price = a.price, pos = a.pos and c.physics.pack(a.pos), score = merit, forecast = res, goal = a.goal}
-            end
-        end
-        if not best and not next(s.enemies) and cap > 0 and s.towerCount >= cap and s.cash >= rs.cost and cached[1] then
-            local newValue = val(rs,cached[1].pos)
-            for id,t in pairs(s.towers) do
-                if t.owned and t.type == "Ranger" and t.path1 == 0 and t.path2 == 0 and val(rs,c.physics.vec(t.pos)) < newValue * 0.3 then
-                    local a = {kind = "sell", id = id, reason = "poor_future_coverage"}
-                    if c.executor.available(a) then best = a break end
-                end
-            end
-        end
-        local skip = {allowed = false, reason = "vote_unavailable"}
-        if c.executor.canSkip(s) and s.time - lastSkip > 4 then
-            lastSkip = s.time
-            skip = c.goodskip.assess(s, c, routes, los, s.waveAge)
-        end
-        return {wave = s.wave, revision = s.revision, baseline = base, recommendation = best or {kind = "hold", reason = save and "save_for_upgrade" or "no_positive_action"}, skip = skip, mode = "auto", future = future, goal = goal, capacity = totalValue, stealthCapacity = stealthValue, observedWaveAge = s.waveAge}
+        best=table.clone(best)
+        best.forecast=chosen
+        return {wave=s.wave,revision=s.revision,baseline=base,recommendation=best,skip=skip,mode="auto",future=c.forecast.future(wi),goal=best.goal,rollout=rollout,observedWaveAge=s.waveAge,emergency=emergency}
     end
-
     return p
 end
 

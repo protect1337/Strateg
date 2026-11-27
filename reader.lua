@@ -33,6 +33,8 @@ function m.new()
     local wave
     local age
     local lastTime
+    local timer
+    local timerAt
     local bind = require(common.BindableHandler)
     bind.GetEvent("WaveChanged"):AttachCallback(function(n, rewind, started)
         if started and not rewind then
@@ -43,6 +45,11 @@ function m.new()
             wave = nil
             age = nil
         end
+    end)
+
+    bind.GetEvent("TimeLeftChanged"):AttachCallback(function(n)
+        timer = n
+        timerAt = os.clock()
     end)
 
     function r.read()
@@ -76,6 +83,11 @@ function m.new()
             towers = {}
         }
 
+        if s.running and type(timer) == "number" then
+            s.timerRemaining = math.max(0, timer - (s.time - timerAt) * (s.speed or 1))
+        else
+            s.timerRemaining = s.timeLeft
+        end
         if s.running and wave == s.wave and age ~= nil then
             local now = s.time
             age += math.max(0, now - (lastTime or now)) * (s.speed or 1)

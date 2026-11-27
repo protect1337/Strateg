@@ -136,7 +136,7 @@ function m.new(common, reader, ctx, log)
                 if not x.canSkip(s) or a.wave ~= s.wave then return false, "vote_unavailable" end
                 local threat = 0
                 for _, e in pairs(s.enemies) do threat += e.hp + (e.shield or 0) end
-                if threat > (a.threat or 0) + 0.01 or s.lives < (a.lives or s.lives) then return false, "forecast_changed" end
+                if threat > (a.threat or 0) + math.max(8, (a.threat or 0) * 0.05) or s.lives < (a.lives or s.lives) then return false, "forecast_changed" end
                 vote:FireServer(true)
                 votedWave = s.wave
                 return true
