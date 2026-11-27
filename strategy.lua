@@ -1,4 +1,4 @@
-local m={version="adaptive-v6"}
+local m={version="adaptive-v7"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -70,6 +70,13 @@ function m.new(c,routes,los,spots)
         {core=1,upper=false,expand=4,siteMode=2},{core=2,upper=false,expand=4,siteMode=2},
         {core=2,upper=true,expand=5,siteMode=2},{core=3,upper=false,expand=5,siteMode=3}
     }
+    for i=1,6 do
+        local p=table.clone(policies[i+6])
+        p.flex=true
+        p.spend=i%2==0
+        p.repairs={{from=8+i%4,to=maxWave,core=3+i%3,upper=i%2==0,expand=4+i%2,depth=30+i*8,longRange=0.35+i*0.07,seed=i*37,flex=true,spend=true,extra=8+i,expandCash=500+i*250,live=true,late=true,lateReserve=0,lateWeight=1+i*0.12}}
+        policies[#policies+1]=p
+    end
     local dt=0.15
     local earlyLimit=cfg.StartingLives*0.10
     local stressEarlyLimit=cfg.StartingLives*0.15
@@ -130,17 +137,26 @@ function m.new(c,routes,los,spots)
                         if opt.seed then v*=1+0.12*math.sin(i*12.9898+opt.seed*78.233) end
                         if wi>=12 and opt.live then
                             local reach=0
+                            local baseReach=0
+                            local live=0
                             for _,e in ipairs(z.enemies) do
                                 if not e.dead then
+                                    live+=1
                                     local start=math.floor(e.dist+0.5)
-                                    for d=start,math.min(math.ceil(r.length),start+40),4 do
-                                        if b.hit[d] then reach+=1 end
+                                    for d=start,math.ceil(r.length),3 do
+                                        local weight=e.type=="Plague Doctor" and 3 or 1
+                                        if b.hit[d] then reach+=weight end
+                                        if a.hit[d] then baseReach+=weight end
                                     end
                                 end
                             end
-                            v*=1+math.min(3,reach*0.07)
+                            if wi==maxWave and live>0 then
+                                v=(baseReach+reach*0.35)*density
+                            else
+                                v*=1+math.min(3,reach*0.07)
+                            end
                         end
-                        if not score or v>score then best,score=p,v end
+                        if v>0 and (not score or v>score) then best,score=p,v end
                     end
                 end
             end
@@ -284,7 +300,7 @@ function m.new(c,routes,los,spots)
                     t,cost=install(site(wi),#z.towers%2==0)
                 end
             end
-            if not t and opt.flex and z.cash>=165 and wi>=1 then
+            if not t and (opt.flex or wi>=6 and z.cash>=3500) and z.cash>=165 and wi>=1 then
                 local urgent=false
                 for _,e in ipairs(z.enemies) do
                     if not e.dead and e.dist>=r.length*0.55 then urgent=true break end
@@ -465,8 +481,8 @@ function m.new(c,routes,los,spots)
             return math.max(1,v.to)
         end
         local function score(v)
-            local eligible=v.complete and v.lives>=150 and v.earlyLoss<=earlyLimit
-            return v.to*10000+(eligible and 1000000 or v.complete and 100000 or 0)-math.max(0,v.loss)*5-math.max(0,v.earlyLoss-earlyLimit)*100-(v.remainingHP or 0)*0.25
+            local eligible=v.complete and v.lives>0
+            return v.to*10000+(eligible and 1000000 or 0)-math.max(0,v.loss)*5-v.earlyLoss*10-(v.remainingHP or 0)*0.15
         end
         local function retain(v,p,w,stressTest)
             local key={}
@@ -492,19 +508,19 @@ function m.new(c,routes,los,spots)
             if not failed or score(v)>score(failed) then failed=v end
             local problem=weak(v)
             local failedStress
-            local reason=not v.complete and (v.unknown>0 and "unknown_data" or v.lives<=0 and "defeat" or "enemies_remaining") or v.lives<150 and "low_hp" or v.earlyLoss>earlyLimit and "early_loss" or math.abs(v.ledgerError)>0.01 and "cash_mismatch" or "stress_pending"
+            local reason=not v.complete and (v.unknown>0 and "unknown_data" or v.lives<=0 and "defeat" or "enemies_remaining") or math.abs(v.ledgerError)>0.01 and "cash_mismatch" or "victory"
             if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError}) end
-            if reason=="stress_pending" then
+            if reason=="victory" then
                 local ok=true
                 local worst=v.lives
                 local checks={}
                 for k in pairs(routes) do
-                    local test=simulate(s,k,policy,true,v.moves,function(w,z) report(i,n,w,z,"stress "..phase) end)
+                    local test=k==idx and v or simulate(s,k,policy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end)
                     if not test then return false end
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
-                    local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or test.lives<100 and "low_hp" or test.earlyLoss>stressEarlyLimit and "early_loss" or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or "passed"
-                    if s.progress then s.progress(i,n,test.to,test.lives,"stress result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError,blockedMove=test.blockedMove,replayed=test.replayed}) end
+                    local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or "passed"
+                    if s.progress then s.progress(i,n,test.to,test.lives,"route result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError,blockedMove=test.blockedMove,replayed=test.replayed}) end
                     if why~="passed" then
                         ok=false
                         failedStress=test
@@ -517,7 +533,7 @@ function m.new(c,routes,los,spots)
                 end
                 if ok then
                     v.ready=true
-                    v.stressLives=worst
+                    v.routeLives=worst
                     v.checks=checks
                     if not best or v.time<best.time then best=v end
                 end
@@ -527,6 +543,7 @@ function m.new(c,routes,los,spots)
         end
         for i,p in ipairs(policies) do
             if not evaluate(p,i,#policies,"search") then return end
+            if best then break end
         end
         while not best do
             if s.cancel and s.cancel() then return end
@@ -537,7 +554,7 @@ function m.new(c,routes,los,spots)
             local tested=0
             for i=1,count do
                 if s.cancel and s.cancel() then return end
-                local parent=parents[1+((round+i-2)%math.min(#parents,i%4==0 and 16 or 6))]
+                local parent=parents[1+((round+i-2)%math.min(#parents,i%4==0 and 24 or 6))]
                 local source=parent.stress or parent.v
                 local w=i%3==0 and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
                 if parent.stress and i%3~=0 then w=parent.w end
@@ -567,6 +584,7 @@ function m.new(c,routes,los,spots)
                 tested+=1
                 local phase=string.format("repair %d | weak wave %d | revise %d-%d",round,w,from,to)
                 if not evaluate(p,i,count,phase) then return end
+                if best then break end
                 task.wait()
             end
             assert(tested>0,"repair batch empty")
