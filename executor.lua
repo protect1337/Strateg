@@ -122,7 +122,7 @@ function m.new(common, reader, ctx, log)
     end
 
     function x.target(a,s)
-        if not allowed(s) or not a or queryPending[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<2 then return false end
+        if not allowed(s) or s.wave<12 or not a or queryPending[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<2 then return false end
         local t=tower(a.id)
         if not t or t.CustomQueryOptions or type(a.query)~="number" or a.query%1~=0 or a.query<0 or a.query>3 or t.QueryTypeIndex==a.query then return false end
         local ok=pcall(function()
@@ -140,6 +140,7 @@ function m.new(common, reader, ctx, log)
         if not a or a.kind == "hold" or not x.available(a) then return false end
         local s = reader.read()
         if not allowed(s) or not x.ready(s) then return false end
+        if a.kind=="sell" and s.wave<12 or a.kind=="skip" and s.wave<9 then return false end
         local player = pc.GetLocalPlayerWrapper()
         if not player or not player.Stats then return false end
         local stats = player.Stats

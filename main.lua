@@ -49,6 +49,8 @@ local ok, err = xpcall(function()
     local readyAttempts=0
     local lastVoteStatus
     local retryScanAt=0
+    local rejectedMap
+    local lastPrint=-math.huge
     net.GetEvent("DifficultyVoteStateUpdate"):AttachCallback(function(data)
         votes = data
     end)
@@ -90,25 +92,36 @@ local ok, err = xpcall(function()
                 return
             end
             if snap.voting and snap.playerCount == 1 then
-                if preflightMap ~= snap.map and not scanning and snap.map and snap.spawnIndices and #snap.spawnIndices > 0 and os.clock()>=retryScanAt then
+                if preflightMap ~= snap.map and rejectedMap~=snap.map and not scanning and snap.map and snap.spawnIndices and #snap.spawnIndices > 0 and os.clock()>=retryScanAt then
                     scanning = true
                     voted = false
                     readySent = false
                     voteAttempts=0
                     readyAttempts=0
                     log.record("decisions",{event="preflight_start",map=snap.map,paths=#snap.spawnIndices,speed=snap.speed,timer=snap.timerRemaining})
+                    print("[Strateg] 0% | scanning map and tower grid")
                     task.spawn(function()
                         local success, problem = xpcall(function()
                             local plan = planner.preflight(snap, function()
                                 local now = state.get()
                                 return not now or now.map ~= snap.map or not now.voting
+                            end,function(i,n,w,lives,phase)
+                                local pct=math.floor((i-1+w/18)/n*100)
+                                if os.clock()-lastPrint>=0.2 or w==18 then
+                                    lastPrint=os.clock()
+                                    print(string.format("[Strateg] %s | variant %d/%d | wave %d/18 | search %d%% | HP %.1f",phase,i,n,w,math.min(99,pct),lives))
+                                end
                             end)
                             local now = state.get()
                             if plan and now and now.voting and now.map == snap.map and now.playerCount == 1 then
                                 log.record("forecast",{event="preflight",map=snap.map,rollout=plan})
-                                if plan.loss >= ctx.economy.config.StartingLives then
-                                    log.record("decisions",{event="preflight_risk",loss=plan.loss,model="aggregate",note="best_plan_not_proven"})
+                                if not plan.ready or plan.to~=#ctx.economy.config.Waves then
+                                    rejectedMap=snap.map
+                                    print(string.format("[Strateg] NOT READY | no validated victory | reached %d/18 | HP %.1f",plan.to,plan.lives or 0))
+                                    log.record("decisions",{event="preflight_rejected",loss=plan.loss,wave=plan.to})
+                                    return
                                 end
+                                print(string.format("[Strateg] READY 100%% | 18/18 | HP %.1f | stress HP %.1f",plan.lives,plan.stressLives))
                                 preflightMap = snap.map
                                 votes = nil
                                 difficultyVote:FireServer(easy)
@@ -124,6 +137,7 @@ local ok, err = xpcall(function()
                         if not success then
                             retryScanAt=os.clock()+1
                             errorLog("preflight",problem)
+                            print("[Strateg] NOT READY | preflight error: "..tostring(problem))
                         end
                         scanning=false
                     end)
@@ -147,14 +161,14 @@ local ok, err = xpcall(function()
                         readyAttempts+=1
                     end
                 end
-                local status=scanning and "scanning" or snap.map and preflightMap==snap.map and (readySent and "ready_sent" or "waiting_vote") or "waiting_map"
+                local status=scanning and "scanning" or rejectedMap==snap.map and "not_ready" or snap.map and preflightMap==snap.map and (readySent and "ready_sent" or "waiting_vote") or "waiting_map"
                 if status~=lastVoteStatus then
                     lastVoteStatus=status
                     log.record("decisions",{event="voting_state",status=status,map=snap.map,paths=snap.spawnIndices and #snap.spawnIndices or 0,timer=snap.timerRemaining})
                 end
                 return
             end
-            if worker or scanning or not snap.running or snap.difficulty ~= "Easy" or snap.playerCount ~= 1 then return end
+            if worker or scanning or not snap.running or snap.difficulty ~= "Easy" or snap.playerCount ~= 1 or preflightMap~=snap.map then return end
             worker = true
             task.spawn(function()
                 local success, problem = xpcall(function()

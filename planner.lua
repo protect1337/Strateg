@@ -11,12 +11,16 @@ function m.new(c)
     local baselineWave
     local valueCache={}
     local queued
+    local cursor=1
+    local soldWave
     local all=c.ranger.all()
     local base=c.ranger.stats(0,0)
 
     local function prepare(s)
         if not s.map or not s.spawnIndices or #s.spawnIndices==0 then return false end
-        local key=s.map..":"..table.concat(s.spawnIndices,",")
+        local indices=table.clone(s.spawnIndices)
+        table.sort(indices)
+        local key=s.map..":"..table.concat(indices,",")
         if key~=mapKey then
             local team=c.team.GetLocalPlayerTeamIndex() or 1
             routes=c.physics.routes(c.path,team,s.spawnIndices)
@@ -28,12 +32,14 @@ function m.new(c)
             mapKey=key
             c.tactics.reset(key)
             rollout=nil
+            cursor=1
+            soldWave=nil
             queued=nil
         end
         return true
     end
 
-    function x.preflight(s,cancel)
+    function x.preflight(s,cancel,progress)
         if not prepare(s) then return end
         local init=table.clone(s)
         init.wave=0
@@ -42,9 +48,10 @@ function m.new(c)
         init.towers={}
         init.towerCount=0
         init.cancel=cancel
+        init.progress=progress
         local first,plan=search.search(init)
-        if not plan or plan.to~=#c.economy.config.Waves then return end
-        rollout=plan
+        if not plan then return end
+        if plan.ready and plan.to==#c.economy.config.Waves then rollout=plan cursor=1 end
         return plan
     end
 
@@ -199,7 +206,7 @@ function m.new(c)
         local loss=baseline.leaks+baseline.unknown
         if loss<=0 then return nil,baseline end
         local lethal=loss>=s.lives
-        if not lethal and loss<math.max(5,s.lives*0.025) then return nil,baseline end
+        if not lethal then return nil,baseline end
         local budget=s.cash
         local sales={}
         for id,t in pairs(s.towers) do
@@ -209,8 +216,10 @@ function m.new(c)
             end
         end
         table.sort(sales,function(a,b) return a.value/math.max(1,a.price)<b.value/math.max(1,b.price) end)
-        if lethal or s.cash<250 then
-            for i=1,math.min(3,#sales) do budget+=sales[i].price end
+        local allowSale=lethal and s.wave>=12 and (s.wave==#c.economy.config.Waves or soldWave~=s.wave) and not queued
+        local saleLimit=s.wave==#c.economy.config.Waves and 2 or 1
+        if allowSale then
+            for i=1,math.min(saleLimit,#sales) do budget+=sales[i].price end
         end
         local options={}
         local function add(a,st,pos,old)
@@ -262,14 +271,14 @@ function m.new(c)
             local money=s.cash
             local cap=s.towerCount
             if money<a.price or a.kind=="place" and cap>=(s.towerLimit or 0) then
-                if not lethal and s.cash>=250 then return end
+                if not allowSale then return end
                 for _,sale in ipairs(sales) do
                     if sale.id~=a.id and c.executor.available({kind="sell",id=sale.id}) then
                         sold[#sold+1]=sale
                         money+=sale.price
                         cap-=1
                         if money>=a.price and (a.kind~="place" or cap<(s.towerLimit or 0)) then break end
-                        if #sold>=3 then break end
+                        if #sold>=saleLimit then break end
                     end
                 end
             end
@@ -282,7 +291,7 @@ function m.new(c)
             local r=c.combat.run(trial,routes,c.physics,los,action,h)
             local remaining=r.leaks+r.unknown
             local gain=loss-remaining
-            if gain<=0.01 then return end
+            if gain<=0.01 or (#sold>0 or a.kind=="place" and s.wave<12) and remaining>=s.lives then return end
             local score=(remaining<s.lives and 1000000 or 0)+gain*100-#sold*30-a.price*0.002
             if not best or score>best.score then best={a=a,sold=sold,r=r,score=score,loss=remaining} end
         end
@@ -291,6 +300,7 @@ function m.new(c)
         local a=best.a
         local goal={kind=a.kind,id=a.id,pos=a.pos and c.physics.pack(a.pos),path1=a.stats.path1,path2=a.stats.path2,live=true}
         if #best.sold>0 then
+            soldWave=s.wave
             queued=goal
             return {kind="sell",id=best.sold[1].id,reason="emergency_fund",predictedLoss=best.loss},baseline
         end
@@ -383,10 +393,11 @@ function m.new(c)
         if s.time-last<0.08 then return end
         last=s.time
         if not prepare(s) then return end
+        if not rollout then return {wave=s.wave,revision=s.revision,recommendation={kind="hold",reason="no_validated_plan"},skip={allowed=false,reason="no_validated_plan"},mode="auto"} end
         valueCache={}
         local ts=threat(s)
         local rescue,baseline
-        if s.time-lastEmergency>=0.45 or baselineWave~=s.wave then
+        if s.wave>=1 and (s.time-lastEmergency>=0.7 or baselineWave~=s.wave) then
             lastEmergency=s.time
             baselineWave=s.wave
             rescue,baseline=emergency(s,ts)
@@ -394,7 +405,8 @@ function m.new(c)
         else
             baseline=cachedBaseline
         end
-        local targets=c.tactics.target(s,ts,los)
+        local targets=nil
+        if s.wave>=12 then targets=c.tactics.target(s,ts,los) end
         local w=c.forecast.wave(s.wave)
         local final=s.wave==#c.economy.config.Waves and w and s.waveAge and s.waveAge>=w.last+1
         local liveSpots
@@ -409,35 +421,43 @@ function m.new(c)
             end
             return liveSpots
         end
-        local skip={allowed=false,reason="priority"}
+        local skip={allowed=false,reason=s.wave<9 and "opening_capital_lock" or "priority"}
         local a=rescue
+        if s.wave<8 and (not baseline or baseline.leaks+baseline.unknown<s.lives or not a) then a=nil queued=nil end
         if not a and queued then
             local done
             a,done=follow(s,queued,ts)
             if done then queued=nil end
         end
-        if not a and final then
+        local planned=false
+        if not a and rollout then
+            while cursor<=#rollout.moves do
+                local goal=rollout.moves[cursor]
+                if final then goal=table.clone(goal) goal.live=true end
+                local v,done=follow(s,goal,ts)
+                if done then cursor+=1
+                else
+                    planned=true
+                    if goal.wave<=s.wave and v then a=v a.reason="verified_plan" end
+                    break
+                end
+            end
+        end
+        if not a and final and not queued then
             a=c.tactics.recycle(s,ts,los)
-            if not a and not queued then
+            if not a then
                 a=c.tactics.rebuild(s,ts,los)
                 if a then queued=a.goal end
             end
         end
-        if not a and rollout and not final then
-            for _,goal in ipairs(rollout.moves or {}) do
-                if goal.wave<=math.max(1,s.wave+1) then
-                    local v,done=follow(s,goal,ts)
-                    if v then a=v a.reason="opening_plan" break end
-                    if not done and s.cash<250 then break end
-                else break end
-            end
-        end
-        if not a and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
+        if not a and (not planned or final) and (final or s.wave>=8) and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
             local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
             a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
             if a then a.reason="available_power" end
         end
-        if not a and not rescue and c.executor.canSkip(s) and s.time-lastSkip>=1 then
+        local core=0
+        for _,t in pairs(s.towers) do if t.owned and t.type=="Ranger" and math.max(t.path1,t.path2)>=4 then core+=1 end end
+        if not a and s.wave>=9 and core>=2 and not rescue and w and s.waveAge and s.waveAge>=w.last+0.5 and c.executor.canSkip(s) and s.time-lastSkip>=2 then
             lastSkip=s.time
             local funded
             if baseline and baseline.leaks>0 and s.cash+c.economy.bonus(s.wave+1)>=250 then
@@ -465,6 +485,7 @@ function m.new(c)
                 end
             end
             skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,funded)
+            if skip.allowed and ((skip.predictedLoss or math.huge)>0.01 or (skip.waitLoss or math.huge)>0.01) then skip.allowed=false skip.reason="preserve_capital" end
             if skip.allowed and skip.purchase then
                 local v=skip.purchase
                 if v.kind=="upgrade" and s.towers[v.id] then
@@ -478,7 +499,7 @@ function m.new(c)
             local q=ts[i]
             top[i]={id=q.id,type=q.e.type,hp=q.e.hp,eta=q.eta,etaReal=q.eta/math.max(0.01,s.speed or 1),dist=q.d,boss=q.e.boss}
         end
-        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason="no_affordable_useful_action",cash=s.cash},skip=skip,mode="auto",targets=targets,emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives}
+        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives}
     end
     return x
 end
