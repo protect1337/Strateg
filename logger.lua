@@ -1,6 +1,6 @@
 local hs = game:GetService("HttpService")
 local m = {}
-local names = {"decisions", "errors", "progress", "shield", "economy", "grenade", "burn", "burst"}
+local names = {"decisions", "errors", "progress", "shield", "economy", "grenade", "burn", "burst", "forecast"}
 
 function m.new()
     local root = "LOGS"
@@ -8,7 +8,7 @@ function m.new()
     local folders = {
         decisions = "plan", errors = "errors", progress = "winrate",
         shield = "damage", economy = "economy", grenade = "grenade",
-        burn = "burn", burst = "burst"
+        burn = "burn", burst = "burst", forecast = "forecast"
     }
     local files = {}
     if not isfolder(root) then makefolder(root) end

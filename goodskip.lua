@@ -30,9 +30,9 @@ function m.preview(s, wave, routes, c)
         if not cfg or type(cfg.Health) ~= "number" or type(cfg.Speed) ~= "number" or cfg.Speed <= 0 then return end
         local override = cfg.DifficultyToStatOverrideMap and cfg.DifficultyToStatOverrideMap[s.difficulty]
         if override then complex = true end
-        if cfg.AbilityNames or cfg.DeathAbilityNames or cfg.SecondLifeData then complex = true end
+        if cfg.AbilityNames or cfg.DeathAbilityNames or cfg.SecondLifeData or cfg.DeathSpawnData then complex = true end
         local hp = cfg.Health * (1 + (seq.AdditionalHealthMultiplier or 0))
-        local shield = (cfg.Shield or 0) * (1 + (seq.AdditionalShieldMultiplier or 0))
+        local shield = (cfg.Shield or 0) + cfg.Health * (seq.AdditionalShieldMultiplier or 0)
         local resist = {}
         for _, item in pairs(cfg.DamageReductionTable or {}) do
             resist[tostring(item.DamageType)] = item.DamageReduction

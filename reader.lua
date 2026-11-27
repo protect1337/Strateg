@@ -30,6 +30,20 @@ function m.new()
     local team = require(common:WaitForChild("TeamUtilities"))
 
     local r = {}
+    local wave
+    local age
+    local lastTime
+    local bind = require(common.BindableHandler)
+    bind.GetEvent("WaveChanged"):AttachCallback(function(n, rewind, started)
+        if started and not rewind then
+            wave = n
+            age = 0
+            lastTime = os.clock()
+        elseif rewind or wave ~= n then
+            wave = nil
+            age = nil
+        end
+    end)
 
     function r.read()
         local g = gameClass.GetCurrentGame()
@@ -62,11 +76,26 @@ function m.new()
             towers = {}
         }
 
+        if s.running and wave == s.wave and age ~= nil then
+            local now = s.time
+            age += math.max(0, now - (lastTime or now)) * (s.speed or 1)
+            lastTime = now
+            s.waveAge = age
+        elseif not s.running then
+            wave = nil
+            age = nil
+        end
+
         for _, e in pairs(ec.GetEnemies()) do
             if e.IsAlive and not e.IsFakeEnemy then
                 local h = e.HealthHandler
                 local mv = e.MovementHandler
                 local id = tostring(e.UniqueId)
+                local predicted
+                if not e.Stunned and not e.Stopped and not mv.ReverseDirection then
+                    local ok, a, b = pcall(function() return e:GetPredictedPosition(0.75), e:GetPredictedPosition(1.5) end)
+                    if ok and typeof(a) == "Vector3" and typeof(b) == "Vector3" then predicted = {vec(a), vec(b)} end
+                end
                 s.enemies[id] = {
                     id = id,
                     type = e.Type,
@@ -77,6 +106,7 @@ function m.new()
                     maxShield = h:GetMaxShield(),
                     pos = vec(e:GetPosition()),
                     pathPos = vec(e:GetPathPosition()),
+                    predicted = predicted,
                     pathIndex = mv.PathIndex,
                     pathProgress = mv.PathPercentage,
                     speed = mv:GetCurrentSpeed(),

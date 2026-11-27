@@ -11,7 +11,7 @@ end
 function m.run(snapshot, routes, physics, los, action, horizon)
     local enemies = {}
     local towers = {}
-    local result = {hpDamage = 0, shieldDamage = 0, leaks = 0, kills = 0, remaining = 0}
+    local result = {hpDamage = 0, cashDamage = 0, shieldDamage = 0, leaks = 0, kills = 0, remaining = 0, children = 0}
     for _, e in pairs(snapshot.enemies) do
         local r = routes[e.pathIndex]
         if r then
@@ -77,9 +77,21 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                     local hp = math.min(best.hp, damage - shield)
                     best.hp -= hp
                     result.hpDamage += hp
+                    if not best.noCash then result.cashDamage += hp end
                     if best.hp <= 0 then
                         best.done = true
                         result.kills += 1
+                        for _, kid in ipairs(best.kids or {}) do
+                            local child = table.clone(kid)
+                            child.id = best.id .. "_child_" .. tostring(result.children + 1)
+                            child.route = best.route
+                            child.dist = best.dist
+                            child.pos = best.pos
+                            child.spawnAt = time + (kid.delay or 0)
+                            child.stealth = best.stealth
+                            table.insert(enemies, child)
+                            result.children += 1
+                        end
                     end
                     t.left -= 1
                     if t.left == 0 then

@@ -26,6 +26,8 @@ local ok, err = xpcall(function()
         resources = require(common.ResourceManager),
         placementHandler = require(common.PlacementHandler)
     }
+    ctx.forecast = load("forecast").new(ctx)
+    log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
     ctx.executor = executor
     local planner = load("planner").new(ctx)
@@ -74,8 +76,9 @@ local ok, err = xpcall(function()
                     local plan = planner.plan(snap)
                     if not plan then return end
                     log.record("decisions", plan)
+                    if plan.future then log.record("forecast", {wave = plan.wave, revision = plan.revision, future = plan.future, recommendation = plan.recommendation, goal = plan.goal}) end
                     local now = state.get()
-                    if stopped or not now or now.map ~= snap.map or now.wave ~= snap.wave or now.time - snap.time > 5 then return end
+                    if stopped or not now or now.map ~= snap.map or now.wave ~= snap.wave or now.time - snap.time > 8 then return end
                     if plan.skip.allowed and executor.run({kind = "skip", wave = snap.wave, threat = plan.skip.threat, lives = plan.skip.lives}) then return end
                     executor.run(plan.recommendation)
                 end, debug.traceback)
