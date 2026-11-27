@@ -1,4 +1,4 @@
-local m={version="adaptive-v5"}
+local m={version="adaptive-v6"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -85,6 +85,7 @@ function m.new(c,routes,los,spots)
         local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},time=0,loss=0,earlyLoss=0,spent=0,income=0,bonuses=0}
         local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 40
         local cursor=1
+        local blockedMove
         local serial=0
         local nextBuy=0
         local unknown=0
@@ -176,7 +177,8 @@ function m.new(c,routes,los,spots)
                 if not st then return end
                 local success
                 if t then success=upgrade(t,st) elseif st.cost==base.cost then success=install(p,a.upper) end
-                if success then cursor+=1 end
+                if success then cursor+=1 blockedMove=nil
+                else blockedMove={wave=wi,age=age,index=cursor,required=t and st.cost-t.st.cost or st.cost,cash=z.cash,pos=a.pos,path1=a.path1,path2=a.path2} end
                 return
             end
             local t,cost
@@ -280,6 +282,35 @@ function m.new(c,routes,los,spots)
                     end
                 elseif not t and not pick and z.cash>=base.cost and #z.towers<cap then
                     t,cost=install(site(wi),#z.towers%2==0)
+                end
+            end
+            if not t and opt.flex and z.cash>=165 and wi>=1 then
+                local urgent=false
+                for _,e in ipairs(z.enemies) do
+                    if not e.dead and e.dist>=r.length*0.55 then urgent=true break end
+                end
+                local choice,nextSt,rank
+                for _,v in ipairs(z.towers) do
+                    local a=path(v.st,v.upper)
+                    if a and a.cost-v.st.cost<=z.cash then
+                        local p=profile(v.pos,a.range,idx)
+                        local reach=p.length
+                        if urgent then
+                            reach=0
+                            for _,e in ipairs(z.enemies) do
+                                if not e.dead and (not e.stealth or a.stealthDetection) then
+                                    for d=math.floor(e.dist+0.5),math.ceil(r.length),4 do if p.hit[d] then reach+=4 end end
+                                end
+                            end
+                        end
+                        local gain=(a.dps-v.st.dps)*reach/math.max(1,a.cost-v.st.cost)^0.65
+                        if a.stealthDetection and not v.st.stealthDetection then gain+=reach*0.05 end
+                        if gain>0 and (not rank or gain>rank) then choice,nextSt,rank=v,a,gain end
+                    end
+                end
+                if choice and (urgent or z.cash>=2500 or opt.spend) then t,cost=upgrade(choice,nextSt) end
+                if not t and urgent and z.cash>=base.cost and #z.towers<math.min(cap,wi<=5 and 3 or math.max(need,wi-3)) then
+                    t,cost=install(site(wi),not stealth or #z.towers%2==0)
                 end
             end
             if t then
@@ -405,7 +436,7 @@ function m.new(c,routes,los,spots)
         end
         local complete=#z.history==maxWave and #z.enemies==0 and z.lives>0 and unknown==0
         local ledgerError=z.cash-(cfg.StartingCash+z.income+z.bonuses-z.spent)
-        return {ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1}
+        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1}
     end
     function x.search(s)
         local began=os.clock()
@@ -414,6 +445,7 @@ function m.new(c,routes,los,spots)
         if not idx then return end
         local best,failed
         local pool={}
+        local signatures={}
         local attempts=0
         local round=0
         local function weakestLate(v)
@@ -436,11 +468,19 @@ function m.new(c,routes,los,spots)
             local eligible=v.complete and v.lives>=150 and v.earlyLoss<=earlyLimit
             return v.to*10000+(eligible and 1000000 or v.complete and 100000 or 0)-math.max(0,v.loss)*5-math.max(0,v.earlyLoss-earlyLimit)*100-(v.remainingHP or 0)*0.25
         end
-        local function retain(v,p,w)
-            local item={v=v,p=p,w=w or weak(v),rank=score(v)}
+        local function retain(v,p,w,stressTest)
+            local key={}
+            for _,a in ipairs(v.moves) do key[#key+1]=string.format("%d:%.2f:%.2f:%.2f:%d:%d",a.wave,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2) end
+            key=table.concat(key,";")
+            local rank=score(v)
+            if stressTest then rank+=stressTest.to*5000+stressTest.lives*40-math.max(0,stressTest.earlyLoss-stressEarlyLimit)*100 end
+            if signatures[key] and signatures[key]>=rank then return end
+            signatures[key]=rank
+            local item={v=v,p=p,w=w or weak(v),rank=rank,stress=stressTest,key=key}
+            for i=#pool,1,-1 do if pool[i].key==key then table.remove(pool,i) end end
             pool[#pool+1]=item
             table.sort(pool,function(a,b) return a.rank>b.rank end)
-            while #pool>16 do table.remove(pool) end
+            while #pool>24 do table.remove(pool) end
         end
         local function report(i,n,w,z,phase)
             if s.progress then s.progress(i,n,w,z.lives,phase) end
@@ -451,6 +491,7 @@ function m.new(c,routes,los,spots)
             if not v then return false end
             if not failed or score(v)>score(failed) then failed=v end
             local problem=weak(v)
+            local failedStress
             local reason=not v.complete and (v.unknown>0 and "unknown_data" or v.lives<=0 and "defeat" or "enemies_remaining") or v.lives<150 and "low_hp" or v.earlyLoss>earlyLimit and "early_loss" or math.abs(v.ledgerError)>0.01 and "cash_mismatch" or "stress_pending"
             if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError}) end
             if reason=="stress_pending" then
@@ -463,10 +504,11 @@ function m.new(c,routes,los,spots)
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
                     local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or test.lives<100 and "low_hp" or test.earlyLoss>stressEarlyLimit and "early_loss" or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or "passed"
-                    if s.progress then s.progress(i,n,test.to,test.lives,"stress result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError}) end
+                    if s.progress then s.progress(i,n,test.to,test.lives,"stress result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError,blockedMove=test.blockedMove,replayed=test.replayed}) end
                     if why~="passed" then
                         ok=false
-                        problem=weak(test)
+                        failedStress=test
+                        problem=test.blockedMove and math.min(weak(test),test.blockedMove.wave) or weak(test)
                         if why=="early_loss" then
                             for _,h in ipairs(test.history) do if h.wave<=5 and h.loss>0 then problem=h.wave break end end
                         end
@@ -480,7 +522,7 @@ function m.new(c,routes,los,spots)
                     if not best or v.time<best.time then best=v end
                 end
             end
-            retain(v,policy,problem)
+            retain(v,policy,problem,failedStress)
             return true
         end
         for i,p in ipairs(policies) do
@@ -496,8 +538,11 @@ function m.new(c,routes,los,spots)
             for i=1,count do
                 if s.cancel and s.cancel() then return end
                 local parent=parents[1+((round+i-2)%math.min(#parents,i%4==0 and 16 or 6))]
-                local w=i%3==0 and weakestLate(parent.v) or i%3==1 and math.max(1,parent.v.to) or parent.w
-                local back=w>=12 and 1+(i-1)%7 or (i-1)%4
+                local source=parent.stress or parent.v
+                local w=i%3==0 and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
+                if parent.stress and i%3~=0 then w=parent.w end
+                local back=w>=12 and 1+(i-1)%10 or (i-1)%4
+                if parent.stress then back=math.max(back,i%6) end
                 local from=math.max(0,w-back)
                 local to=w>=12 and maxWave or math.min(maxWave,w+1+(i%3))
                 local p=table.clone(parent.p)
@@ -507,6 +552,8 @@ function m.new(c,routes,los,spots)
                 if w>=12 then core=math.max(core,math.min(12,4+round%9)) end
                 local patch={from=from,to=to,core=core,upper=i%2==0 and not prev.upper or prev.upper,expand=3+i%3,depth=12+((round*17+i*13)%100),longRange=0.12+(i%5)*0.12,seed=round*count+i,flex=i%3~=0,extra=w>=9 and 2+i%8 or 0,expandCash=w>=9 and 500+(i%5)*1000 or 5500,live=w>=12}
                 if i%2==0 then patch.upper=not prev.upper end
+                patch.spend=i%2==0 or parent.stress~=nil
+                if parent.stress then patch.flex=true end
                 if w>=12 then
                     patch.late=true
                     patch.lateReserve=i%4==0 and 0 or i%4==1 and 1500 or i%4==2 and 3500 or 6500
