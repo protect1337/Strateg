@@ -12,6 +12,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
     local enemies = {}
     local towers = {}
     local sludge = {}
+    local fires={}
     local result = {hpDamage = 0, cashDamage = 0, shieldDamage = 0, leaks = 0, kills = 0, remaining = 0, remainingShield = 0, leaked = {}, children = 0, killTime = 0, finish = horizon, firstDamage = nil, unknown = 0}
     for _, e in pairs(snapshot.enemies) do
         local r = routes[e.pathIndex]
@@ -20,6 +21,9 @@ function m.run(snapshot, routes, physics, los, action, horizon)
             c.route = r
             c.dist = physics.project(r, physics.vec(e.pathPos))
             c.spawnAt = e.spawnAt or 0
+            local burn=e.burn and e.burn.Burn or 0
+            c.burnUntil=math.max(0,burn)
+            c.burnTick=0
             if e.type=="Plague Doctor" or e.boss and e.name=="Plague Doctor" then
                 c.plague=true
                 c.healAt=c.spawnAt+(e.bossHealIn or 12)
@@ -43,6 +47,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 end
             end
             c.nextShot = math.max(0, t.nextAttack or 0)
+            c.fireAt=t.abilities and t.abilities.M203 and t.abilities.M203.cooldown or 0
             c.stunUntil=0
             if t.stunned then
                 for _,b in pairs(t.debuffs or {}) do
@@ -124,6 +129,24 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 end
             end
         end
+        for j=#fires,1,-1 do
+            local f=fires[j]
+            if time>=f.finish then table.remove(fires,j)
+            elseif time>=f.at then
+                for _,e in ipairs(enemies) do
+                    if not e.done and time>=e.spawnAt and e.pos and not e.air and (e.pos-f.pos).Magnitude<=4.5 then
+                        e.burnUntil=time+5
+                        e.burnTick=e.burnTick or time
+                    end
+                end
+            end
+        end
+        for _,e in ipairs(enemies) do
+            if not e.done and time>=e.spawnAt and (e.burnUntil or 0)>time and time+1e-6>=(e.burnTick or 0) then
+                e.burnTick=time+0.25
+                hit(e,adjusted({damage=2,damageType="Fire"},e),time)
+            end
+        end
         local active = false
         for _, e in ipairs(enemies) do if not e.done then active = true break end end
         if not active then result.finish = time break end
@@ -151,6 +174,12 @@ function m.run(snapshot, routes, physics, los, action, horizon)
                 if best then
                     local damage = adjusted(t, best)
                     if damage > 0 and not result.firstDamage then result.firstDamage = time end
+                    if t.path2==5 and time+1e-6>=(t.fireAt or 0) then
+                        local travel=math.max(0.4,(best.pos-t.pos).Magnitude/45)
+                        local at=time+travel
+                        fires[#fires+1]={pos=physics.at(best.route,best.dist+(best.speed or 0)*travel*(best.reverse and -1 or 1)),at=at,finish=at+5}
+                        t.fireAt=time+10
+                    end
                     hit(best, damage, time)
                     t.lastShot=time
                     t.left -= 1

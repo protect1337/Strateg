@@ -140,7 +140,7 @@ function m.new(common, reader, ctx, log)
         if not a or a.kind == "hold" or not x.available(a) then return false end
         local s = reader.read()
         if not allowed(s) or not x.ready(s) then return false end
-        if a.kind=="sell" and s.wave<12 or a.kind=="skip" and s.wave<9 then return false end
+        if a.kind=="sell" and s.wave<12 or a.kind=="skip" and s.wave<1 then return false end
         local player = pc.GetLocalPlayerWrapper()
         if not player or not player.Stats then return false end
         local stats = player.Stats

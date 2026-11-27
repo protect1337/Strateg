@@ -483,7 +483,7 @@ function m.new(c)
             end
             return liveSpots
         end
-        local skip={allowed=false,reason=s.wave<9 and "opening_capital_lock" or "priority"}
+        local skip={allowed=false,reason=s.wave<1 and "setup" or "priority"}
         local a=rescue or queuedAction or plannedAction
         if not a and final and not queued then
             a=c.tactics.recycle(s,ts,los)
@@ -492,48 +492,16 @@ function m.new(c)
                 if a then queued=a.goal end
             end
         end
-        if not a and (not planned or final) and (final or s.wave>=8) and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
+        if not a and (not planned or final) and (final or s.wave>=1) and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
             local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
             a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
             if a then a.reason="available_power" end
         end
-        local core=0
-        for _,t in pairs(s.towers) do if t.owned and t.type=="Ranger" and math.max(t.path1,t.path2)>=4 then core+=1 end end
-        if not a and s.wave>=9 and core>=2 and not rescue and w and s.waveAge and s.waveAge>=w.last+0.5 and c.executor.canSkip(s) and s.time-lastSkip>=2 then
-            lastSkip=s.time
-            local funded
-            if baseline and baseline.leaks>0 and s.cash+c.economy.bonus(s.wave+1)>=250 then
-                local richer=table.clone(s)
-                richer.cash+=c.economy.bonus(s.wave+1)
-                local v=spend(richer,ts,true,livePositions())
-                if v and v.price>s.cash then
-                    if v.kind=="upgrade" then
-                        local t=s.towers[v.id]
-                        local a1=t.path1+(v.path==1 and (v.levels or 1) or 0)
-                        local a2=t.path2+(v.path==2 and (v.levels or 1) or 0)
-                        funded={kind="upgrade",id=v.id,path=v.path,levels=v.levels,price=v.price,stats=c.ranger.stats(a1,a2)}
-                    elseif v.kind=="place" then
-                        local pos=c.physics.vec(v.pos)
-                        local st=base
-                        local gain=value(st,pos,ts)
-                        for _,candidate in ipairs(all) do
-                            if candidate.cost<=richer.cash then
-                                local g=value(candidate,pos,ts)
-                                if g>gain then st,gain=candidate,g end
-                            end
-                        end
-                        funded={kind="place",pos=pos,price=st.cost,stats=st,buildDelay=0.45+(st.path1>0 and 0.45 or 0)+(st.path2>0 and 0.45 or 0)}
-                    end
-                end
-            end
-            skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,funded)
-            if skip.allowed and ((skip.predictedLoss or math.huge)>0.01 or (skip.waitLoss or math.huge)>0.01) then skip.allowed=false skip.reason="preserve_capital" end
-            if skip.allowed and skip.purchase then
-                local v=skip.purchase
-                if v.kind=="upgrade" and s.towers[v.id] then
-                    local t=s.towers[v.id]
-                    queued={id=v.id,path1=t.path1+(v.path==1 and (v.levels or 1) or 0),path2=t.path2+(v.path==2 and (v.levels or 1) or 0)}
-                elseif v.kind=="place" then queued={pos=v.pos,path1=v.path1 or 0,path2=v.path2 or 0,live=funded~=nil} end
+        if not a and s.wave>=1 and not rescue and not queued and w and s.waveAge and s.waveAge>=w.last+0.5 and c.executor.canSkip(s) and s.time-lastSkip>=1 then
+            local goal=rollout.moves[cursor]
+            if not goal or goal.wave>s.wave then
+                lastSkip=s.time
+                skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,nil)
             end
         end
         local top={}
