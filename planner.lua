@@ -440,14 +440,16 @@ function m.new(c)
             if done then queued=nil end
         end
         local rescue,baseline
+        local refreshed=false
         if s.wave>=1 and (s.time-lastEmergency>=0.7 or baselineWave~=s.wave) then
             lastEmergency=s.time
             baselineWave=s.wave
             rescue,baseline=emergency(s,ts,plannedAction,queuedAction)
             cachedBaseline=baseline
+            refreshed=true
         else baseline=cachedBaseline end
         local targets
-        if final and not rescue and not queuedAction and not plannedAction and baseline and baseline.leaks+baseline.unknown>=s.lives then
+        if refreshed and s.wave>=12 and not rescue and not queuedAction and not plannedAction and baseline and baseline.leaks+baseline.unknown>=s.lives then
             local candidates=c.tactics.target(s,ts,los)
             if candidates and candidates[1] then
                 local sim=table.clone(s)
