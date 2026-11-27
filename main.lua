@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/9e992d54b563ee18f9f155024e70726f21f32734/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/32d959c52862ed0a95ea2b54cab91f3fcbb5fd5a/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v6","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v6 | unlimited repair search")
+    assert(ctx.strategy.version=="adaptive-v7","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v7 | victory search")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -131,7 +131,7 @@ local ok, err = xpcall(function()
                                     log.record("decisions",{event="preflight_rejected",loss=plan.loss,wave=plan.to})
                                     return
                                 end
-                                print(string.format("[Strateg] READY 100%% | 18/18 | HP %.1f | stress HP %.1f | attempts %d",plan.lives,plan.stressLives,plan.attempts or 0))
+                                print(string.format("[Strateg] READY 100%% | 18/18 | HP %.1f | route HP %.1f | attempts %d",plan.lives,plan.routeLives or plan.lives,plan.attempts or 0))
                                 preflightMap = snap.map
                                 votes = nil
                                 difficultyVote:FireServer(easy)
