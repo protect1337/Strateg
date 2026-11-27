@@ -197,7 +197,8 @@ function m.new(c,routes,los,spots)
             end
             indexed=#z.towers
             local liveStarts={}
-            if wi>=12 and opt.live then
+            local useLive=wi==maxWave or wi>=12 and opt.live
+            if useLive then
                 for _,e in ipairs(z.enemies) do
                     if not e.dead then
                         local d=math.floor(e.dist+0.5)
@@ -216,7 +217,7 @@ function m.new(c,routes,los,spots)
                         local early=1/(1+a.first/(wi<8 and depth or 55))
                         local v=(a.length+b.length*(opt.longRange or 0.18))*early*density
                         if opt.seed then v*=1+0.12*math.sin(item.i*12.9898+opt.seed*78.233) end
-                        if wi>=12 and opt.live then
+                        if useLive then
                             local reach=0
                             local baseReach=0
                             local live=0
@@ -551,6 +552,7 @@ function m.new(c,routes,los,spots)
                         e.dist+=speed*dt
                         if e.dist>=r.length then
                             e.dead=true
+                            z.lastLeak={type=e.type,hp=e.hp,wave=wi,age=age}
                             z.loss+=e.hp
                             z.lives-=e.hp
                         else
@@ -579,7 +581,9 @@ function m.new(c,routes,los,spots)
         end
         local complete=#z.history==maxWave and #z.enemies==0 and #pending==0 and z.lives>0 and unknown==0
         local ledgerError=z.cash-(cfg.StartingCash+z.income+z.bonuses-z.spent)
-        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1},checkpoints
+        local bossHP=0
+        for _,e in ipairs(z.enemies) do if e.type=="Plague Doctor" then bossHP+=e.hp end end
+        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1,lastLeak=z.lastLeak,bossHP=bossHP},checkpoints
     end
     function x.search(s)
         local began=os.clock()
@@ -636,7 +640,7 @@ function m.new(c,routes,los,spots)
             local problem=weak(v)
             local failedStress
             local reason=not v.complete and (v.unknown>0 and "unknown_data" or v.lives<=0 and "defeat" or "enemies_remaining") or math.abs(v.ledgerError)>0.01 and "cash_mismatch" or "victory"
-            if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError}) end
+            if s.progress then s.progress(i,n,v.to,v.lives,"result "..phase,{reason=reason,cash=v.cash,earlyLoss=v.earlyLoss,remaining=v.remaining,remainingHP=v.remainingHP,unknown=v.unknown,spent=v.spent,income=v.income,bonuses=v.bonuses,ledgerError=v.ledgerError,attempt=attempts,wave=v.to,reusedWaves=v.reusedWaves,bossHP=v.bossHP,lastLeak=v.lastLeak}) end
             if reason=="victory" then
                 local ok=true
                 local worst=v.lives
