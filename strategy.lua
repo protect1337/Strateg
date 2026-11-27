@@ -1,4 +1,4 @@
-local m={version="adaptive-v8"}
+local m={version="adaptive-v9"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -32,6 +32,17 @@ function m.new(c,routes,los,spots)
         profiles[k]=v
         return v
     end
+    local function tail(p,d,stride,last)
+        local key="tail"..stride
+        local a=p[key]
+        if not a then
+            a={}
+            for i=last,0,-1 do a[i]=(p.hit[i] and stride or 0)+(a[i+stride] or 0) end
+            p[key]=a
+        end
+        return a[d] or 0
+    end
+    local siteProfiles={}
     local function path(st,upper)
         local a,b=st.path1,st.path2
         if b<1 then return stats[a*10+b+1] end
@@ -87,7 +98,26 @@ function m.new(c,routes,los,spots)
         end
         return a
     end
-    local function simulate(s,idx,policy,stress,replay,notify)
+    local function sameSettings(a,b)
+        if a==b then return true end
+        for k,v in pairs(a) do if k~="repairs" and b[k]~=v then return false end end
+        for k,v in pairs(b) do if k~="repairs" and a[k]~=v then return false end end
+        return true
+    end
+    local function copyList(a)
+        local b={}
+        for i,v in ipairs(a) do b[i]=table.clone(v) end
+        return b
+    end
+    local function copyState(a)
+        local b=table.clone(a)
+        b.towers=copyList(a.towers)
+        b.enemies=copyList(a.enemies)
+        b.moves=table.clone(a.moves)
+        b.history=table.clone(a.history)
+        return b
+    end
+    local function simulate(s,idx,policy,stress,replay,notify,parent,keep)
         local r=routes[idx]
         local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},time=0,loss=0,earlyLoss=0,spent=0,income=0,bonuses=0}
         local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 40
@@ -99,6 +129,29 @@ function m.new(c,routes,los,spots)
         local sludge={}
         local pending={}
         local hpDamage,shieldDamage,paidDamage,sludgeHits=0,0,0,0
+        local checkpoints={}
+        local firstWave=1
+        local last=math.ceil(r.length)
+        if keep and parent then
+            for wi=0,maxWave-1 do
+                local cp=parent.checkpoints[wi]
+                if not cp or not sameSettings(settings(policy,wi),settings(parent.p,wi)) then break end
+                checkpoints[wi]=cp
+                firstWave=wi+1
+            end
+            local cp=checkpoints[firstWave-1]
+            if cp then
+                z=copyState(cp.z)
+                sludge=copyList(cp.sludge)
+                pending=copyList(cp.pending)
+                serial,nextBuy,unknown=cp.serial,cp.nextBuy,cp.unknown
+                hpDamage,shieldDamage,paidDamage,sludgeHits=cp.hpDamage,cp.shieldDamage,cp.paidDamage,cp.sludgeHits
+            end
+        end
+        local function checkpoint(wi)
+            if not keep then return end
+            checkpoints[wi]={z=copyState(z),sludge=copyList(sludge),pending=copyList(pending),serial=serial,nextBuy=nextBuy,unknown=unknown,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
+        end
         local function add(e,d)
             local a=table.clone(e)
             serial+=1
@@ -111,8 +164,9 @@ function m.new(c,routes,los,spots)
             if a.type=="Plague Doctor" and not bossDataOK then unknown+=1 end
             a.resist=a.resist or {}
             a.born=z.time
-            a.healAt=z.time+12
-            a.summonAt=z.time+7
+            a.healAt=z.time+12+0.9167
+            a.summonAt=z.time+7+0.75
+            a.smokeAt=math.huge
             a.summons=0
             a.smoke=false
             a.maxHp=a.hp
@@ -122,36 +176,54 @@ function m.new(c,routes,los,spots)
             for _,t in ipairs(z.towers) do if (t.pos-pos).Magnitude<spacing-0.01 then return false end end
             return true
         end
+        local nearest={}
+        local indexed=0
         local function site(wi)
             local best,score
             local opt=settings(policy,wi)
-            for i,item in ipairs(spots) do
-                local p=item.pos
-                if free(p) then
+            local list=siteProfiles[idx]
+            if not list then
+                list={}
+                for i,item in ipairs(spots) do
+                    local p=item.pos
                     local a=profile(p,base.range,idx)
-                    local b=profile(p,16,idx)
+                    if a.length>0 then list[#list+1]={i=i,pos=p,a=a,b=profile(p,16,idx)} end
+                end
+                siteProfiles[idx]=list
+            end
+            for j=indexed+1,#z.towers do
+                local pos=z.towers[j].pos
+                for i,item in ipairs(list) do nearest[i]=math.min(nearest[i] or math.huge,(pos-item.pos).Magnitude) end
+            end
+            indexed=#z.towers
+            local liveStarts={}
+            if wi>=12 and opt.live then
+                for _,e in ipairs(z.enemies) do
+                    if not e.dead then
+                        local d=math.floor(e.dist+0.5)
+                        liveStarts[d]=(liveStarts[d] or 0)+(e.type=="Plague Doctor" and 3 or 1)
+                    end
+                end
+            end
+            for i,item in ipairs(list) do
+                local p=item.pos
+                local near=nearest[i] or math.huge
+                if near>=spacing-0.01 then
+                    local a,b=item.a,item.b
                     if a.length>0 then
-                        local near=math.huge
-                        for _,t in ipairs(z.towers) do near=math.min(near,(p-t.pos).Magnitude) end
                         local density=near==math.huge and 1 or 1+0.55/(1+math.max(0,near-spacing)/spacing)
                         local depth=opt.depth or (opt.siteMode==2 and 40 or opt.siteMode==3 and 65 or 17)
                         local early=1/(1+a.first/(wi<8 and depth or 55))
                         local v=(a.length+b.length*(opt.longRange or 0.18))*early*density
-                        if opt.seed then v*=1+0.12*math.sin(i*12.9898+opt.seed*78.233) end
+                        if opt.seed then v*=1+0.12*math.sin(item.i*12.9898+opt.seed*78.233) end
                         if wi>=12 and opt.live then
                             local reach=0
                             local baseReach=0
                             local live=0
-                            for _,e in ipairs(z.enemies) do
-                                if not e.dead then
-                                    live+=1
-                                    local start=math.floor(e.dist+0.5)
-                                    for d=start,math.ceil(r.length),3 do
-                                        local weight=e.type=="Plague Doctor" and 3 or 1
-                                        if b.hit[d] then reach+=weight end
-                                        if a.hit[d] then baseReach+=weight end
-                                    end
-                                end
+                            for d,weight in pairs(liveStarts) do
+                                live+=1
+                                reach+=tail(b,d,3,last)*weight/3
+                                baseReach+=tail(a,d,3,last)*weight/3
                             end
                             if wi==maxWave and live>0 then
                                 v=(baseReach+reach*0.35)*density
@@ -169,7 +241,7 @@ function m.new(c,routes,los,spots)
             if not pos or not free(pos) or z.cash<base.cost or #z.towers>=cap then return false end
             z.cash-=base.cost
             z.spent+=base.cost
-            local t={pos=pos,st=base,upper=upper,nextShot=z.time+0.45,left=base.burstSize,active=z.time+0.45}
+            local t={pos=pos,st=base,profile=profile(pos,base.range,idx),upper=upper,nextShot=z.time+0.45,left=base.burstSize,active=z.time+0.45}
             z.towers[#z.towers+1]=t
             return t,base.cost
         end
@@ -180,6 +252,7 @@ function m.new(c,routes,los,spots)
             z.cash-=cost
             z.spent+=cost
             t.st=st
+            t.profile=profile(t.pos,st.range,idx)
             t.left=st.burstSize
             t.active=z.time+0.3
             t.nextShot=math.max(t.active,math.min(t.nextShot,z.time+st.reload))
@@ -205,11 +278,13 @@ function m.new(c,routes,los,spots)
             local t,cost
             local opt=settings(policy,wi)
             local need=opt.core
+            local final=wi==maxWave and age>=c.forecast.wave(wi).last
+            local function upperChoice(default) return opt.forceUpper or default end
             if wi<=2 and need>3 then need=3 end
             local stealth=false
             for _,v in ipairs(z.towers) do if v.st.stealthDetection then stealth=true break end end
             local pick
-            if opt.late and wi>=12 then
+            if (opt.late and wi>=12) or final then
                 local winner,rank
                 local function consider(t,st,pos)
                     local old=t and t.st
@@ -221,10 +296,7 @@ function m.new(c,routes,los,spots)
                         usable=0
                         for _,e in ipairs(z.enemies) do
                             if not e.dead and not e.air and (not e.stealth or st.stealthDetection) then
-                                local n=0
-                                for d=math.floor(e.dist+0.5),math.ceil(r.length),3 do
-                                    if coverage.hit[d] then n+=3 end
-                                end
+                                local n=tail(coverage,math.floor(e.dist+0.5),3,last)
                                 usable+=n*(e.type=="Plague Doctor" and 3 or 1)
                             end
                         end
@@ -235,8 +307,23 @@ function m.new(c,routes,los,spots)
                     local gain=math.max(0,power-prev)
                     if st.stealthDetection and not (old and old.stealthDetection) then gain+=power*0.25 end
                     local v=gain*usable/math.max(1,cost)^0.65
+                    if final then
+                        local benefit=0
+                        for _,e in ipairs(z.enemies) do
+                            if not e.dead and not e.air then
+                                local d=math.floor(e.dist+0.5)
+                                local function damage(q,p)
+                                    if not q or e.stealth and not q.stealthDetection then return 0 end
+                                    local resist=q.ignoreResistance and 0 or math.clamp(e.resist[tostring(q.damageType)] or 0,0,1)
+                                    return q.dps*(1-resist)*tail(p,d,3,last)/math.max(0.1,e.speed)
+                                end
+                                benefit+=math.max(0,damage(st,coverage)-damage(old,t and t.profile))*(1+math.min(3,e.hp/math.max(1,z.lives)))
+                            end
+                        end
+                        v=benefit/math.max(1,cost)^0.65
+                    end
                     if t then v*=opt.lateWeight or 1 else v*=0.75 end
-                    if not rank or v>rank then winner={t=t,st=st,pos=pos} rank=v end
+                    if v>0 and (not rank or v>rank) then winner={t=t,st=st,pos=pos} rank=v end
                 end
                 for _,v in ipairs(z.towers) do
                     local nextSt=path(v.st,v.upper)
@@ -249,16 +336,17 @@ function m.new(c,routes,los,spots)
                 if winner then
                     if winner.t then t,cost=upgrade(winner.t,winner.st)
                     elseif z.cash>=(opt.lateReserve or 0)+base.cost or not next(z.towers) or wi==maxWave then
-                        t,cost=install(winner.pos,#z.towers%3~=2)
+                        t,cost=install(winner.pos,upperChoice(#z.towers%3~=2))
                     end
                 end
             end
+            if final and not t then return end
             if not t and #z.towers<need then
                 if #z.towers==0 or z.towers[1].st.path1+z.towers[1].st.path2>=2 then
                     if z.cash>=base.cost then
                         local upper=opt.upper
                         if #z.towers%2==1 then upper=not upper end
-                        t,cost=install(site(wi),upper)
+                        t,cost=install(site(wi),upperChoice(upper))
                     end
                 end
             end
@@ -278,7 +366,7 @@ function m.new(c,routes,los,spots)
                             if path(v.st,v.upper) and (not pick or v.st.cost>pick.st.cost) then pick=v end
                         end
                         if wi>=9 and #z.towers<cap and z.cash>=(opt.expandCash or 5500) and #z.towers<math.max(need,wi-5+(opt.extra or 0)) then
-                            t,cost=install(site(wi),#z.towers%2==0)
+                            t,cost=install(site(wi),upperChoice(#z.towers%2==0))
                         end
                     end
                 end
@@ -298,11 +386,11 @@ function m.new(c,routes,los,spots)
                         end
                         if choice then t,cost=upgrade(choice,nextSt)
                         elseif wi>=6 and #z.towers<math.min(cap,need+(opt.extra or 0)) and z.cash>=base.cost then
-                            t,cost=install(site(wi),#z.towers%2==0)
+                            t,cost=install(site(wi),upperChoice(#z.towers%2==0))
                         end
                     end
                 elseif not t and not pick and z.cash>=base.cost and #z.towers<cap then
-                    t,cost=install(site(wi),#z.towers%2==0)
+                    t,cost=install(site(wi),upperChoice(#z.towers%2==0))
                 end
             end
             if not t and (opt.flex or wi>=6 and z.cash>=3500) and z.cash>=165 and wi>=1 then
@@ -320,7 +408,7 @@ function m.new(c,routes,los,spots)
                             reach=0
                             for _,e in ipairs(z.enemies) do
                                 if not e.dead and (not e.stealth or a.stealthDetection) then
-                                    for d=math.floor(e.dist+0.5),math.ceil(r.length),4 do if p.hit[d] then reach+=4 end end
+                                    reach+=tail(p,math.floor(e.dist+0.5),4,last)
                                 end
                             end
                         end
@@ -331,7 +419,7 @@ function m.new(c,routes,los,spots)
                 end
                 if choice and (urgent or z.cash>=2500 or opt.spend) then t,cost=upgrade(choice,nextSt) end
                 if not t and urgent and z.cash>=base.cost and #z.towers<math.min(cap,wi<=5 and 3 or math.max(need,wi-3)) then
-                    t,cost=install(site(wi),not stealth or #z.towers%2==0)
+                    t,cost=install(site(wi),upperChoice(not stealth or #z.towers%2==0))
                 end
             end
             if t then
@@ -367,9 +455,12 @@ function m.new(c,routes,los,spots)
                 end
             end
         end
-        for i=1,12 do purchase(0,0) end
-        z.time=cfg.SetUpTime or 15
-        for wi=1,maxWave do
+        if not checkpoints[0] then
+            for i=1,12 do purchase(0,0) end
+            z.time=cfg.SetUpTime or 15
+            checkpoint(0)
+        end
+        for wi=firstWave,maxWave do
             if s.cancel and s.cancel() then return end
             local w=c.forecast.wave(wi)
             unknown+=w.unknown or 0
@@ -399,8 +490,26 @@ function m.new(c,routes,los,spots)
                 for _,e in ipairs(z.enemies) do
                     if not e.dead then
                         if e.type=="Plague Doctor" then
-                            if z.time>=e.healAt then e.hp=math.min(e.maxHp,e.hp+8750) e.healAt+=30 end
-                            if not e.smoke and e.hp<=7500 then e.smoke=true e.hp=math.min(e.maxHp,e.hp+1000) end
+                            if z.time+1e-6>=e.healAt then
+                                e.hp=math.min(e.maxHp,e.hp+8750)
+                                e.healAt+=30
+                                local pos=c.physics.at(r,e.dist)
+                                for _,t in ipairs(z.towers) do
+                                    if (t.pos-pos).Magnitude<=10 then
+                                        local untilTime=z.time+5
+                                        t.nextShot+=math.max(0,untilTime-math.max(z.time,t.stunUntil or 0))
+                                        t.stunUntil=math.max(t.stunUntil or 0,untilTime)
+                                    end
+                                end
+                            end
+                            if not e.smoke and e.hp<=7500 then e.smoke=true e.hp=math.min(e.maxHp,e.hp+1000) e.smokeAt=z.time end
+                            if z.time+1e-6>=e.smokeAt then
+                                e.smokeAt+=1
+                                local pos=c.physics.at(r,e.dist)
+                                for _,t in ipairs(z.towers) do
+                                    if (t.pos-pos).Magnitude<=30 then t.smokeUntil=z.time+2 end
+                                end
+                            end
                             if z.time>=e.summonAt then
                                 for _,kid in ipairs(e.summons==0 and summon1 or summon2) do add(kid,e.dist-(kid.offset or 0)) end
                                 e.summons+=1
@@ -412,26 +521,25 @@ function m.new(c,routes,los,spots)
                 end
                 for _,t in ipairs(z.towers) do
                     local st=t.st
-                    if z.time+1e-6>=t.nextShot and z.time+1e-6>=t.active then
-                        local p=profile(t.pos,st.range,idx)
+                    if z.time+1e-6>=t.nextShot and z.time+1e-6>=t.active and z.time>=(t.stunUntil or 0) then
+                        local p=t.profile
                         local best
                         for _,e in ipairs(z.enemies) do
                             if not e.dead and not e.air and (not e.stealth or st.stealthDetection) and p.hit[math.floor(e.dist+0.5)] and (not best or e.dist>best.dist) then best=e end
                         end
                         if best then
-                            local debuff=best.type=="Plague Doctor" and (stress and 0.65 or 0.8) or 1
-                            hit(best,st.damage*debuff,st.damageType,st.ignoreResistance,wi)
+                            hit(best,st.damage,st.damageType,st.ignoreResistance,wi)
                             t.lastShot=z.time
                             t.left-=1
                             if t.left<=0 then
                                 t.left=st.burstSize
-                                t.nextShot=z.time+math.max(dt,st.reload)
+                                t.nextShot=z.time+math.max(dt,st.reload/((t.smokeUntil or 0)>z.time and 0.8 or 1))
                             else
                                 t.nextShot=z.time+math.max(dt,st.burstInterval or dt)
                             end
                         elseif t.left<st.burstSize and t.lastShot and z.time+1e-6>=t.lastShot+2*math.max(dt,st.burstInterval or dt) then
                             t.left=st.burstSize
-                            t.nextShot=z.time+math.max(dt,st.reload)
+                            t.nextShot=z.time+math.max(dt,st.reload/((t.smokeUntil or 0)>z.time and 0.8 or 1))
                         end
                     end
                 end
@@ -465,12 +573,13 @@ function m.new(c,routes,los,spots)
             local remainingHP=0
             for _,e in ipairs(z.enemies) do remainingHP+=e.hp+(e.shield or 0) end
             z.history[#z.history+1]={wave=wi,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies,remainingHP=remainingHP,income=z.income,spent=z.spent,bonuses=z.bonuses,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
+            if z.lives>0 and unknown==0 then checkpoint(wi) end
             if notify then notify(wi,z) end
             if z.lives<=0 or unknown>0 then break end
         end
         local complete=#z.history==maxWave and #z.enemies==0 and #pending==0 and z.lives>0 and unknown==0
         local ledgerError=z.cash-(cfg.StartingCash+z.income+z.bonuses-z.spent)
-        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1}
+        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time,history=z.history,moves=z.moves,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1},checkpoints
     end
     function x.search(s)
         local began=os.clock()
@@ -502,7 +611,7 @@ function m.new(c,routes,los,spots)
             local eligible=v.complete and v.lives>0
             return v.to*10000+(eligible and 1000000 or 0)-math.max(0,v.loss)*5-v.earlyLoss*10-(v.remainingHP or 0)*0.15
         end
-        local function retain(v,p,w,stressTest)
+        local function retain(v,p,w,stressTest,checkpoints)
             local key={}
             for _,a in ipairs(v.moves) do key[#key+1]=string.format("%d:%.2f:%.2f:%.2f:%d:%d",a.wave,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2) end
             key=table.concat(key,";")
@@ -510,7 +619,7 @@ function m.new(c,routes,los,spots)
             if stressTest then rank+=stressTest.to*5000+stressTest.lives*40-math.max(0,stressTest.earlyLoss-stressEarlyLimit)*100 end
             if signatures[key] and signatures[key]>=rank then return end
             signatures[key]=rank
-            local item={v=v,p=p,w=w or weak(v),rank=rank,stress=stressTest,key=key}
+            local item={v=v,p=p,w=w or weak(v),rank=rank,stress=stressTest,key=key,checkpoints=checkpoints}
             for i=#pool,1,-1 do if pool[i].key==key then table.remove(pool,i) end end
             pool[#pool+1]=item
             table.sort(pool,function(a,b) return a.rank>b.rank end)
@@ -519,9 +628,9 @@ function m.new(c,routes,los,spots)
         local function report(i,n,w,z,phase)
             if s.progress then s.progress(i,n,w,z.lives,phase) end
         end
-        local function evaluate(policy,i,n,phase)
+        local function evaluate(policy,i,n,phase,parent)
             attempts+=1
-            local v=simulate(s,idx,policy,false,nil,function(w,z) report(i,n,w,z,phase) end)
+            local v,checkpoints=simulate(s,idx,policy,false,nil,function(w,z) report(i,n,w,z,phase) end,parent,true)
             if not v then return false end
             if not failed or score(v)>score(failed) then failed=v end
             local problem=weak(v)
@@ -556,7 +665,7 @@ function m.new(c,routes,los,spots)
                     if not best or v.time<best.time then best=v end
                 end
             end
-            retain(v,policy,problem,failedStress)
+            retain(v,policy,problem,failedStress,checkpoints)
             return true
         end
         for i,p in ipairs(policies) do
@@ -591,6 +700,7 @@ function m.new(c,routes,los,spots)
                 if parent.stress then patch.flex=true end
                 if w>=12 then
                     patch.late=true
+                    patch.forceUpper=i%3~=0
                     patch.lateReserve=i%4==0 and 0 or i%4==1 and 1500 or i%4==2 and 3500 or 6500
                     patch.lateWeight=0.7+(i%5)*0.25
                     patch.longRange=0.25+(i%4)*0.2
@@ -601,7 +711,7 @@ function m.new(c,routes,los,spots)
                 if #p.repairs>18 then table.remove(p.repairs,1) end
                 tested+=1
                 local phase=string.format("repair %d | weak wave %d | revise %d-%d",round,w,from,to)
-                if not evaluate(p,i,count,phase) then return end
+                if not evaluate(p,i,count,phase,parent) then return end
                 if best then break end
                 task.wait()
             end
@@ -610,7 +720,7 @@ function m.new(c,routes,los,spots)
         end
         local plan=assert(best,"search ended without a validated plan")
         plan.ready=true
-        plan.model="adaptive_v8_burst_sludge_no_virtual_grenades"
+        plan.model="adaptive_v9_checkpoint_coverage_boss"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts
