@@ -8,6 +8,7 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
     for _,st in ipairs(ranger.all()) do maxRange=math.max(maxRange,st.range) end
     local seen={}
     local out={}
+    local scanRange=math.max(12,math.min(24,maxRange))
     local samples={}
     local checks=0
     for idx,r in pairs(routes) do
@@ -20,17 +21,17 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
     for _,r in pairs(routes) do
         for d=0,r.length,4 do
             local p=physics.at(r,d)
-            local z0=math.floor((p.Z-12)/dz)
-            local z1=math.ceil((p.Z+12)/dz)
+            local z0=math.floor((p.Z-scanRange)/dz)
+            local z1=math.ceil((p.Z+scanRange)/dz)
             for row=z0,z1 do
                 local shift=row%2*step/2
-                local x0=math.floor((p.X-12-shift)/step)
-                local x1=math.ceil((p.X+12-shift)/step)
+                local x0=math.floor((p.X-scanRange-shift)/step)
+                local x1=math.ceil((p.X+scanRange-shift)/step)
                 for col=x0,x1 do
                     local x=col*step+shift
                     local z=row*dz
                     local k=row..":"..col
-                    if not seen[k] and (x-p.X)^2+(z-p.Z)^2<=144 then
+                    if not seen[k] and (x-p.X)^2+(z-p.Z)^2<=scanRange^2 then
                         seen[k]=true
                         checks+=1
                         if checks%100==0 then task.wait() end
@@ -56,7 +57,7 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
                                         end
                                     end
                                 end
-                                if total>0 then out[#out+1]={pos=pos,coverage=early+up*0.025,total=total,first=first,grid=k,sections=sections} end
+                                if next(sections) then out[#out+1]={pos=pos,coverage=early+up*0.025,total=total,first=first,grid=k,sections=sections} end
                             end
                         end
                     end
@@ -99,7 +100,7 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
         for _,q in ipairs(bucket) do
             if not used[q.v.grid] then
                 result[#result+1]=q.v used[q.v.grid]=true added+=1
-                if added>=18 then break end
+                if added>=32 then break end
             end
         end
     end

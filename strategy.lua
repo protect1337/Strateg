@@ -1,4 +1,4 @@
-local m={version="adaptive-v25"}
+local m={version="adaptive-v26"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -226,7 +226,8 @@ function m.new(c,routes,los,spots)
                 for i,item in ipairs(spots) do
                     local p=item.pos
                     local a=profile(p,base.range,idx,slice)
-                    if a.length>0 then list[#list+1]={i=i,pos=p,a=a,b=profile(p,maxRange,idx,slice),legacy=profile(p,20,idx,slice)} end
+                    local b=profile(p,maxRange,idx,slice)
+                    if b.length>0 then list[#list+1]={i=i,pos=p,a=a,b=b,legacy=profile(p,20,idx,slice)} end
                 end
                 siteProfiles[idx]=list
             end
@@ -412,7 +413,7 @@ function m.new(c,routes,los,spots)
             -- At the end of the match a saved dollar has no value. Compare
             -- funded chains by damage deliverable AFTER their construction time.
             -- Preserve the same individual purchases in the verified replay.
-            if wi==maxWave and age>=c.forecast.wave(wi).last+1 and #urgent>0 then
+            if wi==maxWave and #urgent>0 then
                 local bestChain
                 local function reachable(st,p,delay)
                     local value=0
@@ -424,10 +425,28 @@ function m.new(c,routes,los,spots)
                         if d<last then
                             local damage=impact(st,p,e,d)
                             local demand=e.hp+(e.shield or 0)
-                            value+=math.min(demand,damage)*q.weight*(e.type=="Plague Doctor" and 1.4 or 1)
+                            local g=grenadeSpec(st)
+                            if g and not g.manual and not g.passive and not g.custom and not (e.stealth and not st.stealthDetection) then
+                                local sec=tail(p,d,1,last)/speed
+                                local casts=math.floor(math.max(0,sec-1)/g.cooldown)
+                                damage+=casts*g.damage*(g.estimated and 0.65 or 1)
+                            end
+                            value+=math.min(demand,damage)*q.weight*(e.type=="Plague Doctor" and 2 or 1)
                         end
                     end
                     return value
+                end
+                local function chainStep(old,goal,pos)
+                    local a,b=old.path1,old.path2
+                    local best,rank
+                    for _,step in ipairs({goal.path1>a and stats[(a+1)*10+b] or false,goal.path2>b and stats[a*10+b+1] or false}) do
+                        if step and step.cost>old.cost then
+                            local gain=reachable(step,profile(pos,step.range,idx,slice),0.45)-reachable(old,profile(pos,old.range,idx,slice),0.45)
+                            local value=gain+step.dps*0.001
+                            if not best or value>rank then best,rank=step,value end
+                        end
+                    end
+                    return best
                 end
                 local function consider(v,pos,goal,step,upper)
                     local old=v and v.st
@@ -437,15 +456,36 @@ function m.new(c,routes,los,spots)
                     local delay=0.45*count
                     local gain=reachable(goal,profile(pos,goal.range,idx,slice),delay)-(old and reachable(old,v.profile,delay) or 0)
                     if gain<=0 then return end
-                    local rank=gain/math.max(1,price)^0.25
+                    local rank=gain/(1+price/math.max(1,z.cash)*0.15)
                     if not bestChain or rank>bestChain.rank then bestChain={v=v,pos=pos,goal=goal,step=step,upper=upper,rank=rank} end
+                end
+                -- Commit to a funded chain rather than buying its first level and
+                -- restarting the ranking from scratch every purchase tick.
+                local chain=z.finalChain
+                if chain then
+                    local tower
+                    for _,v in ipairs(z.towers) do if (v.pos-chain.pos).Magnitude<0.1 then tower=v break end end
+                    local goal=stats[chain.path1*10+chain.path2]
+                    if tower and goal and goal.cost>tower.st.cost and goal.cost-tower.st.cost<=z.cash then
+                        local step=chainStep(tower.st,goal,tower.pos)
+                        local delay=0.45*(goal.path1+goal.path2-tower.st.path1-tower.st.path2)
+                        if step and reachable(goal,profile(tower.pos,goal.range,idx,slice),delay)>0 then
+                            t,cost=upgrade(tower,step)
+                            if t then
+                                z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper,finalChain=true}
+                                if t.st.cost>=goal.cost then z.finalChain=nil end
+                                return
+                            end
+                        end
+                    end
+                    z.finalChain=nil
                 end
                 for _,v in ipairs(z.towers) do
                     pause()
                     local a,b=v.st.path1,v.st.path2
                     for _,goal in pairs(stats) do
                         if goal.path1>=a and goal.path2>=b and goal.cost>v.st.cost and goal.cost-v.st.cost<=z.cash then
-                            local step=goal.path1>a and stats[(a+1)*10+b] or stats[a*10+b+1]
+                            local step=chainStep(v.st,goal,v.pos)
                             if step then consider(v,v.pos,goal,step,goal.path1>=goal.path2) end
                         end
                     end
@@ -457,12 +497,15 @@ function m.new(c,routes,los,spots)
                     for i,item in ipairs(siteProfiles[idx] or {}) do
                         if i%16==0 then pause() end
                         if free(item.pos) then
-                            local v=reachable(base,item.a,0.45)+reachable(stats[52] or base,item.b,3.6)*0.3
+                            local v=reachable(base,item.a,0.45)
+                            for _,goal in ipairs({stats[52] or base,stats[25] or base}) do
+                                if goal.cost<=z.cash then v=math.max(v,reachable(goal,profile(item.pos,goal.range,idx,slice),0.45*(goal.path1+goal.path2+1))) end
+                            end
                             if v>0 then options[#options+1]={pos=item.pos,rank=v} end
                         end
                     end
                     table.sort(options,function(a,b) return a.rank>b.rank end)
-                    for i=1,math.min(12,#options) do
+                    for i=1,math.min(16,#options) do
                         local pos=options[i].pos
                         for _,goal in ipairs({base,stats[21],stats[22],stats[32],stats[42],stats[52],stats[23],stats[24],stats[25]}) do
                             consider(nil,pos,goal,base,goal.path1>=goal.path2)
@@ -473,9 +516,15 @@ function m.new(c,routes,los,spots)
                     if bestChain.v then
                         t,cost=upgrade(bestChain.v,bestChain.step)
                     else t,cost=install(bestChain.pos,bestChain.upper) end
-                    if t then z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper} end
+                    if t then
+                        z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper,finalChain=true}
+                        if bestChain.goal.cost>t.st.cost then z.finalChain={pos=t.pos,path1=bestChain.goal.path1,path2=bestChain.goal.path2} end
+                    end
+                    return
                 end
-                return
+                -- Before the last spawn, allow general future-wave investment
+                -- when the current targets cannot use another funded chain.
+                if age>=c.forecast.wave(wi).last+1 then return end
             end
             local best,affordable
             if opt.allocator==3 then
@@ -504,7 +553,7 @@ function m.new(c,routes,los,spots)
                                 long+=math.min(demand,impact(goal,profile(v.pos,goal.range,idx,slice),q.e,q.d))/math.max(1,#urgent)
                             end
                         end
-                        local gain=math.max(0,power(step,profile(v.pos,step.range,idx,slice))-current)
+                        local gain=math.max(0,power(step,profile(v.pos,step.range,idx,slice))-power(v.st,v.profile))
                         local remaining=math.max(price,goal.cost-v.st.cost)
                         local level=math.max(v.st.path1,v.st.path2)
                         local rank=(math.max(0,long-current)/math.max(1,remaining)^0.5+gain/math.max(1,price)^0.5)*(1+level*0.45)
@@ -1539,7 +1588,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v25_ability_dispatch_search"
+        plan.model="adaptive_v26_committed_final_capital"
         plan.repairAttempts=repairAttempts
         plan.grenadeModel="shared_catalog_and_live"
         plan.abilityModels={GrenadeLevel1=c.ability.spec("GrenadeLevel1",abilityCatalog.GrenadeLevel1,base.range),GrenadeLevel2=c.ability.spec("GrenadeLevel2",abilityCatalog.GrenadeLevel2,base.range)}

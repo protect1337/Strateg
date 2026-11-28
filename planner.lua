@@ -616,7 +616,7 @@ function m.new(c)
         local planned,plannedAction=false,nil
         while cursor<=#rollout.moves do
             local goal=rollout.moves[cursor]
-            if final then goal=table.clone(goal) goal.live=true end
+            if final and not goal.finalChain then goal=table.clone(goal) goal.live=true end
             local v,done=follow(s,goal,ts)
             if done then cursor+=1
             else
