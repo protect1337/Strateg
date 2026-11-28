@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/568a0ebd51975c90686995f29fcf518c0819f4b5/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/a7e796334cfc5a3e676c95122a5447b11fa2c17d/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v17","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v17 | natural clear | verified skip replay | final investment")
+    assert(ctx.strategy.version=="adaptive-v18","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v18 | independent grenade | verified skip replay | final investment")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -70,6 +70,7 @@ local ok, err = xpcall(function()
     local readerMs,observeMs=0,0
     local lastDecisionKey,lastDecisionAt=nil,-math.huge
     local lastSkipKey,lastSkipLogAt=nil,-math.huge
+    local abilityCursor,abilityNext,abilityLastLog=0,0,-math.huge
 
     local function errorLog(stage, problem)
         local key = stage .. tostring(problem)
@@ -253,6 +254,23 @@ local ok, err = xpcall(function()
                         end
                     end
                     if plan.skip.allowed and executor.run({kind="skip",wave=snap.wave,threat=plan.skip.threat,lives=plan.skip.lives},now) then return end
+                    if now.wave>=1 and next(now.enemies) and now.time>=abilityNext then
+                        abilityNext=now.time+0.10
+                        local ok,actions,cursor,metrics=pcall(ctx.ability.rank,now,ctx.physics,nil,8,abilityCursor)
+                        if ok then
+                            abilityCursor=cursor
+                            if now.time-abilityLastLog>=2 then
+                                abilityLastLog=now.time
+                                log.record("debug",{event="grenade_scan",wave=now.wave,abilities=metrics,candidates=#actions})
+                            end
+                            for _,a in ipairs(actions) do
+                                if executor.available(a) and executor.run(a,now) then
+                                    abilityNext=now.time+0.25
+                                    return
+                                end
+                            end
+                        else errorLog("ability_scan",actions) end
+                    end
                     executor.run(plan.recommendation,now)
                 end, debug.traceback)
                 if not success then errorLog("planner", problem) end
