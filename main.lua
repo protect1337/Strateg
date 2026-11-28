@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/d6e80602b5b57f0db7f38161ae0245951c832526/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/fe650f1f04d69d68a73b46124a96cfd7927d8dae/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
