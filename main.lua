@@ -65,6 +65,7 @@ local ok, err = xpcall(function()
     local stopped = false
     local connection
     local logBusy=false
+    local nextLogPump=0
     local frames,frameTime,frameMax,slowFrames=0,0,0,0
     local readerMs,observeMs=0,0
     local lastDecisionKey,lastDecisionAt=nil,-math.huge
@@ -83,7 +84,8 @@ local ok, err = xpcall(function()
         elapsed += dt
         frames+=1 frameTime+=dt frameMax=math.max(frameMax,dt)
         if dt>1/30 then slowFrames+=1 end
-        if not logBusy and not stopped then
+        if not logBusy and not stopped and os.clock()>=nextLogPump then
+            nextLogPump=os.clock()+0.12
             logBusy=true
             task.defer(function()
                 local ok,err=pcall(log.pump)

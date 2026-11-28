@@ -10,7 +10,8 @@ function m.new(c)
     local cachedBaseline
     local baselineWave
     local valueCache=setmetatable({},{__mode="k"})
-    local job,finished,latest
+    local job,finished
+    local lastSkipKey
     local lastHeavy=-math.huge
     local lastAbility=-math.huge
     local heavyMs=0
@@ -18,9 +19,10 @@ function m.new(c)
     local function workSlice()
         local j=job
         if not j or j.thread~=coroutine.running() then return end
-        if os.clock()-j.sliceAt>=0.0015 then
+        if os.clock()-j.sliceAt>=j.budget then
             j.cpu+=os.clock()-j.sliceAt
-            task.wait()
+            local frame=task.wait()
+            j.budget=frame>0.033 and 0.00065 or frame>0.022 and 0.001 or 0.0015
             j.sliceAt=os.clock()
         end
         if j.cancelled then error("strateg_cancelled",0) end
@@ -35,7 +37,7 @@ function m.new(c)
     end
     local function launch(kind,s,fn)
         if job then return end
-        local j={kind=kind,s=s,cpu=0,sliceAt=os.clock()}
+        local j={kind=kind,s=s,cpu=0,sliceAt=os.clock(),budget=0.0015}
         job=j
         task.spawn(function()
             j.thread=coroutine.running()
@@ -78,7 +80,7 @@ function m.new(c)
             skipContinuation=nil
             queued=nil
             if job then job.cancelled=true end
-            finished=nil cachedBaseline=nil baselineWave=nil lastEmergencyKey=nil
+            finished=nil cachedBaseline=nil baselineWave=nil lastEmergencyKey=nil lastSkipKey=nil
         end
         return true
     end
@@ -481,7 +483,6 @@ function m.new(c)
             queued=nil
             skipContinuation=nil
         elseif skipContinuation and (s.wave>skipContinuation.wave or s.time-skipContinuation.at>5) then skipContinuation=nil end
-        latest=s
         if job and not sameDefense(job.s,s) then job.cancelled=true end
         local ts=threat(s)
         local w=c.forecast.wave(s.wave)
@@ -513,7 +514,8 @@ function m.new(c)
         local result=finished
         finished=nil
         if result then
-            local fresh=sameDefense(result.s,s) and s.time-result.s.time<=8
+            local ttl=result.kind=="skip" and 8 or result.kind=="emergency" and 4 or 2
+            local fresh=sameDefense(result.s,s) and s.time-result.s.time<=ttl
             if result.error then errorMessage=result.error
             elseif fresh and result.result then
                 local v=result.result
@@ -551,7 +553,11 @@ function m.new(c)
         local behind=expected and s.lives+0.01<expected.lives
         urgent=threatHP>0 and (nearest<=10 or threatHP>=s.lives or behind)
         local emergencyKey=string.format("%d:%d:%d:%d",s.wave,s.towerCount,math.floor(s.lives/10),math.floor(threatHP/100))
+        local levels=0
+        for _,t in pairs(s.towers) do levels+=(t.path1 or 0)+(t.path2 or 0) end
         local plannedSkip=rollout.skips and rollout.skips[s.wave]
+        local skipKey=string.format("%d:%d:%d:%d:%d",s.wave,s.towerCount,levels,math.floor(s.lives/10),math.floor(s.cash/500))
+        local skipChanged=skipKey~=lastSkipKey or s.time-lastSkip>=12
         local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>2
             and (not plannedSkip or s.waveAge>=plannedSkip-2 or not a)
         if not job and not skip.allowed and not errorMessage then
@@ -584,8 +590,8 @@ function m.new(c)
                     end
                     return {action=action,baseline=b,goal=goal,sold=sold,targets=targetActions}
                 end)
-            elseif dueSkip and not queued and s.time-lastSkip>=6 and (not a or plannedSkip and s.waveAge>=plannedSkip-1) then
-                lastSkip=s.time
+            elseif dueSkip and not queued and skipChanged and s.time-lastSkip>=5 and (not a or plannedSkip and s.waveAge>=plannedSkip-1) then
+                lastSkip=s.time lastSkipKey=skipKey
                 local snap=table.clone(s)
                 snap.runtimeSlice=workSlice
                 launch("skip",s,function()
