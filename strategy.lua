@@ -1,4 +1,4 @@
-local m={version="adaptive-v14"}
+local m={version="adaptive-v15"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -76,6 +76,27 @@ function m.new(c,routes,los,spots)
     for i=1,24 do
         policies[i]={core=1+(i-1)%3,upper=i%4~=0,mix=i%4==0 or i%5==0,crossEarly=i%3==0,depth=16+(i%6)*12,longRange=0.35+(i%4)*0.18,seed=i*31,risk=0.7+(i%5)*0.14,fast=i%3~=0,earlySkip=i%4==0,skipDelay=({0,2,5,10,20,35})[(i-1)%6+1],placeBias=0.65+(i%5)*0.25,focus=1+(i%4)*0.25}
     end
+    local oldPolicies=table.clone(policies)
+    for i=1,24 do
+        local p=table.clone(oldPolicies[i])
+        p.allocator=1
+        p.placeBias=({0.7,1,1.3})[(i-1)%3+1]
+        p.focus=({0.7,1,1.5,2})[(i-1)%4+1]
+        p.capitalHorizon=({18,30,45,65})[(i-1)%4+1]
+        p.fast=i%4~=3
+        p.earlySkip=false
+        p.skipDelay=({0,5,12,25})[(i-1)%4+1]
+        policies[i]=p
+    end
+    for i=1,12 do
+        local p=table.clone(oldPolicies[i])
+        p.allocator=2
+        p.placeBias=0.45+(i%4)*0.15
+        p.fast=i%3~=0
+        p.earlySkip=false
+        policies[#policies+1]=p
+    end
+    for i=1,6 do policies[#policies+1]=oldPolicies[i] end
     local dt=0.05
     local earlyLimit=cfg.StartingLives*0.10
     local stressEarlyLimit=cfg.StartingLives*0.15
@@ -278,6 +299,12 @@ function m.new(c,routes,los,spots)
             end
             local opt=settings(policy,wi)
             local need=math.clamp(opt.core or 2,1,3)
+            local elapsed=math.max(dt,z.time-(z.cashSampleAt or z.time-dt))
+            local earned=math.max(0,z.income-(z.cashSampleIncome or z.income))
+            local alpha=1-math.exp(-elapsed/6)
+            z.cashRate=(z.cashRate or 0)*(1-alpha)+earned/elapsed*alpha
+            z.cashSampleAt=z.time
+            z.cashSampleIncome=z.income
             local t,cost
             local function build(urgent)
                 local upper=opt.upper~=false
@@ -358,6 +385,128 @@ function m.new(c,routes,los,spots)
                 return value/cached.norm+cached.value
             end
             local best,affordable
+            if opt.allocator==1 then
+                -- Compare complete investment alternatives on the same horizon.
+                -- A tower placement pays for its entire chain, an upgrade only for additional levels.
+                local horizon=opt.capitalHorizon or 30
+                local upcoming={}
+                local availableIncome=0
+                local weightedDemand=0
+                local throughput=0
+                for _,v in ipairs(z.towers) do throughput+=v.st.dps end
+                for _,e in ipairs(z.enemies) do
+                    if not e.dead and not e.air then
+                        weightedDemand+=e.hp+(e.shield or 0)
+                        if not e.noCash then availableIncome+=math.min(e.hp,e.cashLeft or e.hp) end
+                    end
+                end
+                for offset=0,5 do
+                    local w=c.forecast.wave(math.max(1,wi)+offset)
+                    if w then
+                        local weight=1/(1+offset*0.5)
+                        for _,g in ipairs(w.groups or {}) do
+                            if not g.air then upcoming[#upcoming+1]={e=g,weight=weight} end
+                        end
+                    end
+                end
+                local function worth(st,pos,p)
+                    if not st then return 0 end
+                    local key="capital"..wi..":"..st.path1..":"..st.path2
+                    p.future=p.future or {}
+                    local future=p.future[key]
+                    if not future then
+                        local sum,weight=0,0
+                        for _,g in ipairs(upcoming) do
+                            local e=g.e
+                            local duration=p.length/math.max(0.1,e.speed)
+                            local concurrency=math.max(1,(e.count or 1)*duration/math.max(1,(e.last or 0)-(e.first or 0)+duration))
+                            local demand=e.hp+(e.shield or 0)+(e.extra or 0)
+                            local damage=impact(st,p,e,0)/concurrency
+                            -- Count usable rather than nominal damage; allow strong tiers to exploit high-HP and resistance-heavy waves.
+                            sum+=g.weight*(e.count or 1)*math.min(demand,damage)
+                            weight+=g.weight*(e.count or 1)
+                        end
+                        future=sum/math.max(1,weight)
+                        p.future[key]=future
+                    end
+                    local current=0
+                    for _,q in ipairs(urgent) do
+                        local demand=q.e.hp+(q.e.shield or 0)+(q.e.extra or 0)
+                        local damage=impact(st,p,q.e,q.d)
+                        current+=math.min(demand,damage)*q.weight*math.min(1.5,q.ratio)
+                    end
+                    return future*(opt.focus or 1)+current/math.max(1,#urgent)
+                end
+                local incomeRate=math.max(z.cashRate or 0,math.min(throughput,availableIncome/math.max(1,horizon))*c.economy.income(math.max(1,wi),1)*0.55)
+                local nextBonus=wi<maxWave and c.economy.bonus(wi+1) or 0
+                local nextAge=wi==0 and (cfg.SetUpTime or 15) or math.max(0,(cfg.Waves[wi].CustomWaveTime or 60)-age)
+                local function funding(price)
+                    local missing=math.max(0,price-z.cash)
+                    if missing<=0 then return 0 end
+                    local wait=missing/math.max(0.01,incomeRate)
+                    if wi<maxWave and nextBonus>0 and wait>nextAge then
+                        wait=nextAge+math.max(0,missing-incomeRate*nextAge-nextBonus)/math.max(0.01,incomeRate)
+                    end
+                    return wait
+                end
+                local function evaluate(v,pos,old,step,goal,place)
+                    local price=step.cost-(old and old.cost or 0)
+                    local cost=goal.cost-(old and old.cost or 0)
+                    if price<=0 or cost<price then return end
+                    local wait=funding(price)
+                    local fullWait=funding(cost)
+                    if wait>horizon then return end
+                    local oldValue=old and worth(old,pos,v.profile) or 0
+                    local current=worth(step,pos,profile(pos,step.range,idx,slice))-oldValue
+                    local gain=worth(goal,pos,profile(pos,goal.range,idx,slice))-oldValue
+                    local discount=math.max(0,1-fullWait/horizon)
+                    local immediate=math.max(0,current)*math.max(0,1-wait/horizon)
+                    local final=math.max(0,gain)*discount
+                    local rank=math.max(immediate/price^0.85,final/cost^0.85)
+                    if place then rank*=opt.placeBias or 1 end
+                    local item={t=v,st=step,goal=goal,price=price,pos=pos,rank=rank,place=place,wait=wait}
+                    if rank>0 and (not best or rank>best.rank) then best=item end
+                    if rank>0 and price<=z.cash and (not affordable or rank>affordable.rank) then affordable=item end
+                end
+                local function upgrades(v)
+                    local old=v.st
+                    local a,b=old.path1,old.path2
+                    for _,step in ipairs({stats[(a+1)*10+b] or false,stats[a*10+b+1] or false}) do
+                        if step and step.path1>=a and step.path2>=b and step.cost>old.cost then
+                            evaluate(v,v.pos,old,step,step,false)
+                            for _,goal in ipairs({stats[52] or false,stats[25] or false,stats[42] or false,stats[24] or false,stats[32] or false,stats[23] or false}) do
+                                if goal and goal.path1>=step.path1 and goal.path2>=step.path2 then evaluate(v,v.pos,old,step,goal,false) end
+                            end
+                        end
+                    end
+                end
+                for _,v in ipairs(z.towers) do pause() upgrades(v) end
+                if #z.towers<cap and z.cash>=base.cost then
+                    local pos=site(wi,threatened)
+                    if pos then
+                        evaluate(nil,pos,nil,base,base,true)
+                        for _,goal in ipairs({stats[52] or false,stats[25] or false,stats[32] or false,stats[23] or false}) do
+                            if goal then evaluate(nil,pos,nil,base,goal,true) end
+                        end
+                    end
+                end
+                local choice=best and best.price<=z.cash and best or nil
+                -- Waiting is a real candidate. Only override it for an immediate danger,
+                -- using a discounted benefit comparison, not a tower-count requirement.
+                if not choice and affordable and (threatened and best and best.wait>math.max(2,horizon*0.18) or best and affordable.rank>=best.rank*0.95) then choice=affordable end
+                if choice then
+                    if choice.place then
+                        local upper=choice.goal.path1>choice.goal.path2 or choice.goal.path1==choice.goal.path2 and opt.upper~=false
+                        t,cost=install(choice.pos,upper)
+                    else
+                        t,cost=upgrade(choice.t,choice.st)
+                    end
+                end
+                if t then
+                    z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper}
+                end
+                return
+            end
             for _,v in ipairs(z.towers) do
                 pause()
                 local st=path(v.st,v.upper,opt.crossEarly)
@@ -394,6 +543,14 @@ function m.new(c,routes,los,spots)
             local choice=best and best.price<=z.cash and best or threatened and affordable or nil
             if #z.towers==0 then
                 if placeOption then t,cost=install(placeOption.pos,placeOption.upper) end
+            elseif opt.allocator==2 then
+                if best and best.price<=z.cash then
+                    t,cost=upgrade(best.t,best.st)
+                elseif threatened and affordable then
+                    t,cost=upgrade(affordable.t,affordable.st)
+                elseif placeOption and (not best or #z.towers<need and (wi==0 or threatened) or threatened and urgent[1] and urgent[1].ratio>1.3 and placeOption.rank>best.rank*1.25) then
+                    t,cost=install(placeOption.pos,placeOption.upper)
+                end
             elseif placeOption and placeOption.rank>0 and (not best or placeOption.rank>(choice and choice.rank or best.rank)) then
                 t,cost=install(placeOption.pos,placeOption.upper)
             elseif choice then
@@ -864,7 +1021,7 @@ function m.new(c,routes,los,spots)
         end
         local function retain(v,p,w,stressTest,checkpoints)
             local key={}
-            for _,a in ipairs(v.moves) do key[#key+1]=string.format("%d:%.2f:%.2f:%.2f:%d:%d",a.wave,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2) end
+            for _,a in ipairs(v.moves) do key[#key+1]=string.format("%d:%.2f:%.2f:%.2f:%.2f:%d:%d",a.wave,a.age or 0,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2) end
             for wi=1,maxWave-1 do key[#key+1]=string.format("s%d:%.2f",wi,v.skips[wi] or -1) end
             key=table.concat(key,";")
             local rank=score(v)
@@ -952,7 +1109,7 @@ function m.new(c,routes,los,spots)
                 local source=parent.stress or parent.v
                 local w=(best or i%3==0) and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
                 if parent.stress and i%3~=0 then w=parent.w end
-                local back=w>=12 and 1+(i-1)%10 or (i-1)%4
+                local back=(i%4==0 and w or i%3==0 and math.min(w,4+round%5) or w>=12 and 1+(i-1)%10 or 1+(i-1)%4)
                 if parent.stress then back=math.max(back,i%6) end
                 local from=math.max(0,w-back)
                 local to=w>=12 and maxWave or math.min(maxWave,w+1+(i%3))
@@ -982,14 +1139,16 @@ function m.new(c,routes,los,spots)
                 patch.fast=i%4~=0
                 patch.earlySkip=i%5==0
                 patch.skipDelay=({0,2,5,10,20,35})[(i+round)%6+1]
-                patch.placeBias=0.5+(i%6)*0.25
-                if best and i%2==0 then
+                patch.placeBias=0.55+(i%6)*0.18
+                patch.allocator=({1,1,2,1,2,0})[(i+round)%6+1]
+                patch.capitalHorizon=({18,30,45,65})[(round+i)%4+1]
+                if i%3==0 then
                     p=table.clone(parent.p)
                     p.skipAges=table.clone(parent.p.skipAges or {})
-                    local wi=1+((round*5+i*3)%math.max(1,maxWave-1))
+                    local wi=best and 1+((round*5+i*3)%math.max(1,maxWave-1)) or math.max(1,math.min(maxWave-1,w-1-(round+i)%math.max(1,math.min(w,5))))
                     local wv=c.forecast.wave(wi)
                     local old=source.skips[wi] or math.max(15,wv.last+0.5)
-                    local delta=({-8,-4,-2,2,4,8})[(round+i)%6+1]
+                    local delta=best and ({-8,-4,-2,2,4,8})[(round+i)%6+1] or ({4,8,15,25})[(round+i)%4+1]
                     p.skipAges[wi]=i%6==0 and -1 or math.max(20.25,old+delta)
                 else
                     p.repairs[#p.repairs+1]=patch
@@ -1012,7 +1171,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v14_checkpoint_skips"
+        plan.model="adaptive_v15_capital_alternatives"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts
