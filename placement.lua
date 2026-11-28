@@ -1,7 +1,7 @@
 local m={}
 
 function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
-    local step=(ranger.config.Radius or 1.5)*2+0.05
+    local step=(ranger.config.Radius or 1.5)*2+0.005
     local dz=step*math.sqrt(3)/2
     local baseRange=ranger.stats(0,0).range
     local maxRange=baseRange

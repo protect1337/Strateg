@@ -1,4 +1,4 @@
-local m={version="adaptive-v26"}
+local m={version="adaptive-v27"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -7,7 +7,7 @@ function m.new(c,routes,los,spots)
     local stats={}
     local base=c.ranger.stats(0,0)
     local radius=base.radius or 1.5
-    local spacing=radius*2+0.05
+    local spacing=radius*2+0.005
     for _,v in ipairs(c.ranger.all()) do stats[v.path1*10+v.path2]=v end
     local maxRange=base.range
     for _,st in pairs(stats) do maxRange=math.max(maxRange,st.range) end
@@ -113,8 +113,11 @@ function m.new(c,routes,los,spots)
     end
     -- Explore investment-chain policies before the broad legacy search.
     local focused={}
+    for i=1,12 do
+        focused[#focused+1]={allocator=4,core=2+(i%3),depth=({25,60,120})[(i-1)%3+1],longRange=0.55,seed=i*137,risk=0.8,fast=false,earlySkip=false,placeBias=({0.8,1,1.2})[(i-1)%3+1],capitalHorizon=({18,30,50,75})[(i-1)%4+1],focus=1,grenades=true,legacySite=false,portfolioFuture=({0.5,1,1.5})[(i-1)%3+1],portfolioWait=({0.65,1,1.5,2})[(i-1)%4+1]}
+    end
     for i=1,24 do
-        focused[i]={allocator=3,core=1+(i-1)%3,upper=i%4==0,mix=i%4==3,crossEarly=i%3==0,depth=({18,40,75,110})[(i-1)%4+1],longRange=0.35+(i%4)*0.18,seed=i*71,risk=0.8+(i%4)*0.2,fast=false,earlySkip=false,skipDelay=0,placeBias=0.75+(i%3)*0.15,focus=1.5,capitalHorizon=45,grenades=true,legacySite=i%3==0}
+        focused[#focused+1]={allocator=3,core=1+(i-1)%3,upper=i%4==0,mix=i%4==3,crossEarly=i%3==0,depth=({18,40,75,110})[(i-1)%4+1],longRange=0.35+(i%4)*0.18,seed=i*71,risk=0.8+(i%4)*0.2,fast=false,earlySkip=false,skipDelay=0,placeBias=0.75+(i%3)*0.15,focus=1.5,capitalHorizon=45,grenades=true,legacySite=i%3==0}
     end
     for _,p in ipairs(policies) do p.legacySite=true p.grenades=true focused[#focused+1]=p end
     policies=focused
@@ -527,6 +530,160 @@ function m.new(c,routes,los,spots)
                 if age>=c.forecast.wave(wi).last+1 then return end
             end
             local best,affordable
+            if opt.allocator==4 then
+                -- Independent portfolio policy: every legal next level and every
+                -- reachable funded tier is an alternative, not a fixed path.
+                -- This score proposes actions; the full event simulator validates them.
+                if z.time<(z.portfolioAt or 0) then return end
+                z.portfolioAt=z.time+0.9
+                local horizon=opt.capitalHorizon or 30
+                local goals={base}
+                for _,st in ipairs(c.ranger.all()) do if st.path1+st.path2>0 then goals[#goals+1]=st end end
+                local future={}
+                for offset=0,3 do
+                    local w=c.forecast.wave(math.max(1,wi)+offset)
+                    if w then
+                        for gi,g in ipairs(w.groups or {}) do
+                            if not g.air then
+                                local n=g.count or 1
+                                local duration=math.max(1,(g.last or 0)-(g.first or 0))
+                                future[#future+1]={e=g,n=n,demand=(g.hp+(g.shield or 0)+(g.extra or 0))*n,weight=1/(1+offset),duration=duration,key=math.max(1,wi)+offset..":"..gi}
+                            end
+                        end
+                    end
+                end
+                local function damage(st,p,e,d,delay)
+                    local speed=math.max(0.1,e.speed or 1)
+                    if e.air or e.stealth and not st.stealthDetection then return 0 end
+                    local start=math.min(last,math.floor(d+speed*delay+0.5))
+                    if start>=last then return 0 end
+                    local v=impact(st,p,e,start)
+                    local g=grenadeSpec(st)
+                    if g and not g.manual and not g.passive and not g.custom then
+                        local sec=tail(p,start,1,last)/speed
+                        local resist=math.clamp((e.resist or {})[g.kind] or 0,0,1)
+                        local per=g.damage*(g.estimated and 0.65 or 1)*(1-resist)*(1-math.clamp(e.allReduction or 0,0,1))
+                        if e.maxDamage and e.maxDamage>=0 then per=math.min(per,e.maxDamage) end
+                        v+=math.floor(math.max(0,sec-1)/g.cooldown)*per
+                    end
+                    return v
+                end
+                local function futurePower(st,p,g)
+                    p.portfolio=p.portfolio or {}
+                    local key=g.key..":"..st.path1..":"..st.path2
+                    local v=p.portfolio[key]
+                    if v==nil then
+                        local exposure=p.length/math.max(0.1,g.e.speed or 1)
+                        local concurrent=math.max(1,g.n*exposure/(g.duration+exposure))
+                        v=math.min(g.demand,damage(st,p,g.e,0,0)*g.n/concurrent)
+                        p.portfolio[key]=v
+                    end
+                    return v
+                end
+                local portfolio={}
+                for i,g in ipairs(future) do
+                    local sum=0
+                    for _,v in ipairs(z.towers) do sum+=futurePower(v.st,v.profile,g) end
+                    portfolio[i]=sum
+                end
+                local income=math.max(1,z.cashRate or 0)
+                local nextBonus=wi<maxWave and c.economy.bonus(wi+1) or 0
+                local nextAge=wi==0 and (cfg.SetUpTime or 15) or math.max(0,(cfg.Waves[wi].CustomWaveTime or 60)-age)
+                local function funding(price)
+                    local missing=math.max(0,price-z.cash)
+                    local wait=missing/income
+                    if nextBonus>0 and wait>nextAge then wait=nextAge+math.max(0,missing-income*nextAge-nextBonus)/income end
+                    return wait
+                end
+                local function gain(old,oldP,st,p,delay)
+                    local current,futureValue,norm=0,0,0
+                    for _,q in ipairs(urgent) do
+                        local demand=q.e.hp+(q.e.shield or 0)
+                        local oldD=old and damage(old,oldP,q.e,q.d,delay) or 0
+                        local newD=damage(st,p,q.e,q.d,delay)
+                        local residual=math.max(0,demand-math.max(0,demand/math.max(0.01,q.ratio)-oldD))
+                        current+=math.max(0,math.min(residual,newD)-math.min(residual,oldD))*q.weight
+                    end
+                    for i,g in ipairs(future) do
+                        local oldD=old and futurePower(old,oldP,g) or 0
+                        local newD=futurePower(st,p,g)
+                        local residual=math.max(0,g.demand-math.max(0,portfolio[i]-oldD))
+                        -- Preserve a modest throughput value after predicted
+                        -- demand is met; exact rollout handles overlap and timing.
+                        futureValue+=g.weight*(math.min(residual,newD)-math.min(residual,oldD)+0.08*(newD-oldD))/math.max(1,g.n)
+                        norm+=g.weight
+                    end
+                    return current/math.max(1,#urgent)+math.max(0,futureValue)/math.max(1,norm)*(opt.portfolioFuture or 1)
+                end
+                local chosen,waiting
+                local function consider(v,pos,step,goal)
+                    local old=v and v.st
+                    local cost=goal.cost-(old and old.cost or 0)
+                    local price=step.cost-(old and old.cost or 0)
+                    if price<=0 or cost<price then return end
+                    local wait=funding(cost)
+                    if wait>horizon then return end
+                    local delay=wait+0.45*(goal.path1+goal.path2-(old and old.path1+old.path2 or 0)+(v and 0 or 1))
+                    local discount=math.max(0,1-delay/horizon)
+                    local benefit=gain(old,v and v.profile,goal,profile(pos,goal.range,idx,slice),delay)
+                    local rank=benefit*discount/math.max(1,cost)^0.65
+                    if not v then rank*=opt.placeBias or 1 end
+                    if rank<=0 then return end
+                    local item={v=v,pos=pos,step=step,goal=goal,rank=rank,wait=wait}
+                    if cost<=z.cash and price<=z.cash then
+                        if not chosen or rank>chosen.rank then chosen=item end
+                    elseif not waiting or rank>waiting.rank then waiting=item end
+                end
+                for _,v in ipairs(z.towers) do
+                    pause()
+                    local a,b=v.st.path1,v.st.path2
+                    for _,step in ipairs({stats[(a+1)*10+b] or false,stats[a*10+b+1] or false}) do
+                        if step then
+                            consider(v,v.pos,step,step)
+                            for _,goal in ipairs(goals) do
+                                if goal.cost>step.cost and goal.path1>=step.path1 and goal.path2>=step.path2 then consider(v,v.pos,step,goal) end
+                            end
+                        end
+                    end
+                end
+                if #z.towers<cap and z.cash>=base.cost then
+                    local primary=site(wi,threatened)
+                    local shortlist={}
+                    if primary then shortlist[#shortlist+1]=primary end
+                    local ranks={}
+                    for i,item in ipairs(siteProfiles[idx] or {}) do
+                        if i%32==0 then pause() end
+                        if free(item.pos) and item.a.length>0 then
+                            local rank=item.a.length+item.b.length*0.55
+                            if threatened then
+                                local live=0
+                                for _,q in ipairs(urgent) do live+=tail(item.a,q.d,1,last)*q.weight end
+                                rank+=live/math.max(1,#urgent)
+                            end
+                            ranks[#ranks+1]={pos=item.pos,rank=rank}
+                        end
+                    end
+                    table.sort(ranks,function(a,b) return a.rank>b.rank end)
+                    for _,item in ipairs(ranks) do
+                        local distinct=true
+                        for _,pos in ipairs(shortlist) do if (pos-item.pos).Magnitude<spacing*2 then distinct=false break end end
+                        if distinct then shortlist[#shortlist+1]=item.pos end
+                        if #shortlist>=5 then break end
+                    end
+                    for _,pos in ipairs(shortlist) do
+                        pause()
+                        for _,goal in ipairs(goals) do consider(nil,pos,base,goal) end
+                    end
+                end
+                local choice=chosen
+                if waiting and chosen and not threatened and waiting.rank>chosen.rank*(opt.portfolioWait or 1.3) and waiting.wait<horizon*0.45 then choice=nil end
+                if choice then
+                    if choice.v then t,cost=upgrade(choice.v,choice.step)
+                    else t,cost=install(choice.pos,choice.goal.path1>=choice.goal.path2) end
+                end
+                if t then z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper} end
+                return
+            end
             if opt.allocator==3 then
                 -- A distinct candidate policy: finish a productive chain instead of
                 -- continually choosing a cheap first step. Other policies still
@@ -1337,7 +1494,7 @@ function m.new(c,routes,los,spots)
         local improvedAt=0
         local bestRank=-math.huge
         local function policyKey(p)
-            local fields={"core","upper","mix","crossEarly","depth","longRange","seed","risk","fast","earlySkip","skipDelay","placeBias","focus","allocator","capitalHorizon","forceUpper","spend","legacySite"}
+            local fields={"core","upper","mix","crossEarly","depth","longRange","seed","risk","fast","earlySkip","skipDelay","placeBias","focus","allocator","capitalHorizon","forceUpper","spend","legacySite","portfolioFuture","portfolioWait"}
             local key={tostring(p.cancelEarly),tostring(p.grenades),tostring(p.grenadeScale)}
             for w=0,maxWave do
                 local v=settings(p,w)
@@ -1523,7 +1680,9 @@ function m.new(c,routes,los,spots)
                 patch.earlySkip=i%5==0
                 patch.skipDelay=({0,2,5,10,20,35})[(i+round)%6+1]
                 patch.placeBias=0.55+(i%6)*0.18
-                patch.allocator=({3,1,2,3,2,0})[(i+round)%6+1]
+                patch.allocator=({4,1,2,3,4,0})[(i+round)%6+1]
+                patch.portfolioFuture=({0.5,1,1.5})[(i+round)%3+1]
+                patch.portfolioWait=({0.8,1.2,1.7})[(i+round)%3+1]
                 patch.legacySite=prev.legacySite
                 patch.capitalHorizon=({18,30,45,65})[(round+i)%4+1]
                 if i%3==0 then
@@ -1547,7 +1706,7 @@ function m.new(c,routes,los,spots)
                     q.seed=round*997+i*31
                     q.depth=12+(round*19+i*11)%140
                     q.longRange=0.15+((round+i)%9)*0.13
-                    q.allocator=({3,1,3,2,0})[(round+i)%5+1]
+                    q.allocator=({4,1,3,2,0})[(round+i)%5+1]
                     q.grenades=true
                     q.legacySite=(round+i)%3==0
                     q.placeBias=0.45+((round*3+i)%11)*0.14
@@ -1588,7 +1747,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v26_committed_final_capital"
+        plan.model="adaptive_v27_portfolio_search"
         plan.repairAttempts=repairAttempts
         plan.grenadeModel="shared_catalog_and_live"
         plan.abilityModels={GrenadeLevel1=c.ability.spec("GrenadeLevel1",abilityCatalog.GrenadeLevel1,base.range),GrenadeLevel2=c.ability.spec("GrenadeLevel2",abilityCatalog.GrenadeLevel2,base.range)}
