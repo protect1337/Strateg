@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/a723362ab7e42448701e2bd56bdb2f26b1d75e17/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/bc0a2dfc101c7e42177ce5d297f548e25913ee02/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v20","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v20 | diverse preflight | marginal grenade | verified skip")
+    assert(ctx.strategy.version=="adaptive-v21","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v21 | investment chains | conservative grenade model | verified skip")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
