@@ -9,6 +9,8 @@ local function adjusted(t, e)
 end
 
 function m.run(snapshot, routes, physics, los, action, horizon)
+    local slice=snapshot.runtimeSlice
+    local function pause() if slice then slice() end end
     local enemies = {}
     local towers = {}
     local sludge = {}
@@ -107,7 +109,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
     local steps = math.floor(horizon / dt + 0.5)
     for i = 0, steps do
         local time = i * dt
-        if i > 0 and i % 200 == 0 then task.wait() end
+        if slice then pause() elseif i>0 and i%200==0 then task.wait() end
         physics.sludgePrune(sludge,time)
         for _, e in ipairs(enemies) do
             if not e.done and time >= e.spawnAt then
@@ -151,6 +153,7 @@ function m.run(snapshot, routes, physics, los, action, horizon)
         for _, e in ipairs(enemies) do if not e.done then active = true break end end
         if not active then result.finish = time break end
         for _, t in ipairs(towers) do
+            pause()
             if t.pendingStats and time >= t.activeAt then
                 for k,v in pairs(t.pendingStats) do t[k]=v end
                 t.pendingStats=nil

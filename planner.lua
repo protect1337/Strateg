@@ -9,7 +9,47 @@ function m.new(c)
     local lastEmergency=-math.huge
     local cachedBaseline
     local baselineWave
-    local valueCache={}
+    local valueCache=setmetatable({},{__mode="k"})
+    local job,finished,latest
+    local lastHeavy=-math.huge
+    local lastAbility=-math.huge
+    local heavyMs=0
+    local lastEmergencyKey
+    local function workSlice()
+        local j=job
+        if not j or j.thread~=coroutine.running() then return end
+        if os.clock()-j.sliceAt>=0.0015 then
+            j.cpu+=os.clock()-j.sliceAt
+            task.wait()
+            j.sliceAt=os.clock()
+        end
+        if j.cancelled then error("strateg_cancelled",0) end
+    end
+    local function sameDefense(a,b)
+        if not a or not b or a.map~=b.map or a.wave~=b.wave or a.towerCount~=b.towerCount or b.lives<a.lives-0.01 then return false end
+        for id,t in pairs(a.towers) do
+            local v=b.towers[id]
+            if not v or t.path1~=v.path1 or t.path2~=v.path2 or t.query~=v.query or t.stunned~=v.stunned or t.attackDisabled~=v.attackDisabled then return false end
+        end
+        return true
+    end
+    local function launch(kind,s,fn)
+        if job then return end
+        local j={kind=kind,s=s,cpu=0,sliceAt=os.clock()}
+        job=j
+        task.spawn(function()
+            j.thread=coroutine.running()
+            j.sliceAt=os.clock()
+            local ok,result=xpcall(fn,debug.traceback)
+            j.cpu+=os.clock()-j.sliceAt
+            heavyMs=j.cpu*1000
+            if not j.cancelled then
+                if ok then finished={kind=kind,s=s,result=result,wall=os.clock()-s.time,cpu=heavyMs}
+                else finished={kind=kind,s=s,error=tostring(result),wall=os.clock()-s.time,cpu=heavyMs} end
+            end
+            if job==j then job=nil end
+        end)
+    end
     local queued
     local cursor=1
     local soldWave
@@ -37,6 +77,8 @@ function m.new(c)
             soldWave=nil
             skipContinuation=nil
             queued=nil
+            if job then job.cancelled=true end
+            finished=nil cachedBaseline=nil baselineWave=nil lastEmergencyKey=nil
         end
         return true
     end
@@ -119,6 +161,7 @@ function m.new(c)
         local seen={}
         local team=c.team.GetLocalPlayerTeamIndex()
         local function add(p)
+            workSlice()
             local key=string.format("%.1f:%.1f",p.X,p.Z)
             if not seen[key] then
                 seen[key]=true
@@ -171,6 +214,7 @@ function m.new(c)
         if group[k]~=nil then return group[k] end
         local score=0
         for i=1,math.min(8,#ts) do
+            workSlice()
             local q=ts[i]
             local e=q.e
             if not e.air and not e.invulnerable and not e.noDamage and (not e.stealth or st.stealthDetection) then
@@ -197,6 +241,7 @@ function m.new(c)
         local h=math.min(66,math.max(5,urgent[1].eta+1))
         for _,q in ipairs(urgent) do h=math.max(h,math.min(66,q.eta+0.5)) end
         local sim=table.clone(s)
+        sim.runtimeSlice=workSlice
         sim.enemies={}
         for id,e in pairs(s.enemies) do
             local v=table.clone(e)
@@ -234,6 +279,7 @@ function m.new(c)
         local budget=s.cash
         local sales={}
         for id,t in pairs(s.towers) do
+            workSlice()
             if t.owned and t.type=="Ranger" and t.sellValue and t.sellValue>0 then
                 local st=c.ranger.stats(t.path1,t.path2)
                 sales[#sales+1]={id=id,price=t.sellValue,value=value(st,c.physics.vec(t.pos),urgent)}
@@ -255,6 +301,7 @@ function m.new(c)
             end
         end
         for id,t in pairs(s.towers) do
+            workSlice()
             if t.owned and t.type=="Ranger" then
                 local old=c.ranger.stats(t.path1,t.path2)
                 for _,st in ipairs(all) do
@@ -273,6 +320,7 @@ function m.new(c)
         local positions=near(s,urgent)
         local ranked={}
         for _,pos in ipairs(positions) do
+            workSlice()
             local rank=0
             for _,st in ipairs({base,c.ranger.stats(1,1),c.ranger.stats(2,3),c.ranger.stats(3,2)}) do
                 if st.cost<=budget then rank=math.max(rank,value(st,pos,urgent)/st.cost^0.25) end
@@ -320,22 +368,19 @@ function m.new(c)
             local score=(remaining<s.lives and 1000000 or 0)+gain*100-#sold*30-a.price*0.002
             if not best or score>best.score then best={a=a,sold=sold,r=r,score=score,loss=remaining} end
         end
-        for i=1,math.min(6,#options) do assess(options[i]) end
+        for i=1,math.min(6,#options) do workSlice() assess(options[i]) end
         if not best then return nil,baseline end
         local a=best.a
         baseline.rescueLoss=best.loss
         local goal={kind=a.kind,id=a.id,pos=a.pos and c.physics.pack(a.pos),path1=a.stats.path1,path2=a.stats.path2,live=true}
         if #best.sold>0 then
-            soldWave=s.wave
-            queued=goal
-            return {kind="sell",id=best.sold[1].id,reason="emergency_fund",predictedLoss=best.loss},baseline
+            return {kind="sell",id=best.sold[1].id,reason="emergency_fund",predictedLoss=best.loss},baseline,goal,true
         end
-        queued=goal
         if a.kind=="upgrade" then
             local step=nextStep(s.towers[a.id],a.stats,s.cash)
-            if step then step.reason="emergency_upgrade" step.predictedLoss=best.loss return pack(step),baseline end
+            if step then step.reason="emergency_upgrade" step.predictedLoss=best.loss return pack(step),baseline,goal end
         else
-            return {kind="place",pos=goal.pos,price=base.cost,reason="emergency_intercept",predictedLoss=best.loss},baseline
+            return {kind="place",pos=goal.pos,price=base.cost,reason="emergency_intercept",predictedLoss=best.loss},baseline,goal
         end
         return nil,baseline
     end
@@ -368,6 +413,7 @@ function m.new(c)
         local wi=math.max(1,s.wave)
         local best,rank
         local function check(a,st,pos,old)
+            workSlice()
             if not valid(a,s) then return end
             local current=value(st,pos,ts)-(old and value(old,pos,ts) or 0)
             local future=0
@@ -431,7 +477,8 @@ function m.new(c)
             queued=nil
             skipContinuation=nil
         elseif skipContinuation and (s.wave>skipContinuation.wave or s.time-skipContinuation.at>5) then skipContinuation=nil end
-        valueCache={}
+        latest=s
+        if job and not sameDefense(job.s,s) then job.cancelled=true end
         local ts=threat(s)
         local w=c.forecast.wave(s.wave)
         local final=s.wave==#c.economy.config.Waves and w and s.waveAge and s.waveAge>=w.last+1
@@ -453,70 +500,125 @@ function m.new(c)
             queuedAction,done=follow(s,queued,ts)
             if done then queued=nil end
         end
-        local rescue,baseline
-        local refreshed=false
-        if s.wave>=1 and (s.time-lastEmergency>=0.7 or baselineWave~=s.wave) then
-            lastEmergency=s.time
-            baselineWave=s.wave
-            rescue,baseline=emergency(s,ts,plannedAction,queuedAction)
-            cachedBaseline=baseline
-            refreshed=true
-        else baseline=cachedBaseline end
+        local baseline=cachedBaseline
+        if baselineWave~=s.wave then baseline=nil cachedBaseline=nil end
+        local a=queuedAction or plannedAction
+        local skip={allowed=false,reason=job and "analysis_running" or "priority"}
         local targets
-        if refreshed and s.wave>=12 and not rescue and not queuedAction and not plannedAction and baseline and baseline.leaks+baseline.unknown>=s.lives then
-            local candidates=c.tactics.target(s,ts,los)
-            if candidates and candidates[1] then
-                local sim=table.clone(s)
-                sim.towers=table.clone(s.towers)
-                sim.enemies={}
-                for id,e in pairs(s.enemies) do
-                    local v=table.clone(e)
-                    v.kids=c.forecast.children(e.type)
-                    sim.enemies[id]=v
+        local errorMessage
+        local result=finished
+        finished=nil
+        if result then
+            local fresh=sameDefense(result.s,s) and s.time-result.s.time<=8
+            if result.error then errorMessage=result.error
+            elseif fresh and result.result then
+                local v=result.result
+                if result.kind=="emergency" then
+                    baseline=v.baseline
+                    cachedBaseline=baseline baselineWave=s.wave
+                    if v.action and valid(v.action,s) then
+                        a=v.action queued=v.goal
+                        if v.sold then soldWave=s.wave end
+                    elseif not a and v.targets then targets=v.targets end
+                elseif result.kind=="skip" then
+                    skip=v
+                    if skip.allowed and skip.plan and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>1 then
+                        local hp=0
+                        for _,e in pairs(s.enemies) do hp+=e.hp+(e.shield or 0) end
+                        if hp<=skip.threat+math.max(8,skip.threat*0.05) and s.lives>=skip.lives then
+                            skipContinuation={wave=s.wave,at=s.time,plan=skip.plan}
+                        else skip.allowed=false skip.reason="forecast_changed" end
+                    else skip.allowed=false end
+                    skip.plan=nil
+                elseif result.kind=="spend" and not a and not planned and v.action and valid(v.action,s) then
+                    a=v.action queued=v.goal
+                elseif result.kind=="ability" and not a and v.action and c.executor.available(v.action) then
+                    a=v.action
                 end
-                local h=math.min(66,math.max(5,ts[1] and ts[1].eta+1 or 5))
-                for _,q in ipairs(ts) do h=math.max(h,math.min(66,q.eta+0.5)) end
-                local initial=c.combat.run(sim,routes,c.physics,los,nil,h)
-                local a=candidates[1]
-                local t=table.clone(sim.towers[a.id])
-                t.query=a.query
-                sim.towers[a.id]=t
-                local trial=c.combat.run(sim,routes,c.physics,los,nil,h)
-                if trial.leaks+trial.unknown+0.01<initial.leaks+initial.unknown then targets={a} end
             end
         end
-        local liveSpots
-        local function livePositions()
-            if not liveSpots then
-                liveSpots={}
-                for _,p in ipairs(near(s,ts)) do
-                    local v=value(base,p,ts)
-                    if v>0 then liveSpots[#liveSpots+1]={pos=p,rank=v} end
-                end
-                table.sort(liveSpots,function(a,b) return a.rank>b.rank end)
-            end
-            return liveSpots
+        local urgent=false
+        local nearest=math.huge
+        local threatHP=0
+        for _,q in ipairs(ts) do
+            if q.eta<=25 then threatHP+=q.e.hp nearest=math.min(nearest,q.eta) end
         end
-        local skip={allowed=false,reason=s.wave<1 and "setup" or "priority"}
-        local a=rescue or queuedAction or plannedAction
-        if not a and final and not planned and not queued then
-            a=c.tactics.recycle(s,ts,los)
-            if not a then
-                a=c.tactics.rebuild(s,ts,los)
-                if a then queued=a.goal end
-            end
-        end
-        if not a and not planned and (final or s.wave>=1) and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
-            local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
-            a=spend(s,ts,liveOnly,liveOnly and livePositions() or nil)
-            if a then a.reason="available_power" end
-        end
-        if s.wave>=1 and not rescue and not queued and w and s.waveAge and c.executor.canSkip(s) and s.time-lastSkip>=3 and (not a or a.kind=="hold" or rollout.skips and rollout.skips[s.wave] and s.waveAge>=rollout.skips[s.wave]) then
-            lastSkip=s.time
-            skip=c.goodskip.assess(s,c,routes,los,s.waveAge,spots,nil,search,rollout)
-            if skip.allowed and skip.plan then
-                skipContinuation={wave=s.wave,at=s.time,plan=skip.plan}
-                skip.plan=nil
+        local expected=rollout.history[s.wave]
+        local behind=expected and s.lives+0.01<expected.lives
+        urgent=threatHP>0 and (nearest<=10 or threatHP>=s.lives or behind)
+        local emergencyKey=string.format("%d:%d:%d:%d",s.wave,s.towerCount,math.floor(s.lives/10),math.floor(threatHP/100))
+        local plannedSkip=rollout.skips and rollout.skips[s.wave]
+        local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>2
+            and (not plannedSkip or s.waveAge>=plannedSkip-2 or not a)
+        if not job and not skip.allowed and not errorMessage then
+            if urgent and s.time-lastEmergency>=3 and (emergencyKey~=lastEmergencyKey or s.time-lastEmergency>=7) then
+                lastEmergency=s.time lastEmergencyKey=emergencyKey
+                launch("emergency",s,function()
+                    local action,b,goal,sold=emergency(s,ts,plannedAction,queuedAction)
+                    local targetActions
+                    if not action and not plannedAction and not queuedAction and s.wave>=12 and b and b.leaks+b.unknown>=s.lives then
+                        local options=c.tactics.target(s,ts,los,workSlice)
+                        if options and options[1] then
+                            local sim=table.clone(s)
+                            sim.runtimeSlice=workSlice
+                            sim.towers=table.clone(s.towers)
+                            sim.enemies={}
+                            for id,e in pairs(s.enemies) do
+                                workSlice()
+                                local v=table.clone(e) v.kids=c.forecast.children(e.type)
+                                sim.enemies[id]=v
+                            end
+                            local h=math.min(66,math.max(5,ts[1] and ts[1].eta+1 or 5))
+                            for _,q in ipairs(ts) do h=math.max(h,math.min(66,q.eta+0.5)) end
+                            local initial=c.combat.run(sim,routes,c.physics,los,nil,h)
+                            local candidate=options[1]
+                            local t=table.clone(sim.towers[candidate.id])
+                            t.query=candidate.query sim.towers[candidate.id]=t
+                            local trial=c.combat.run(sim,routes,c.physics,los,nil,h)
+                            if trial.leaks+trial.unknown+0.01<initial.leaks+initial.unknown then targetActions={candidate} end
+                        end
+                    end
+                    return {action=action,baseline=b,goal=goal,sold=sold,targets=targetActions}
+                end)
+            elseif dueSkip and not queued and s.time-lastSkip>=6 and (not a or plannedSkip and s.waveAge>=plannedSkip-1) then
+                lastSkip=s.time
+                local snap=table.clone(s)
+                snap.runtimeSlice=workSlice
+                launch("skip",s,function()
+                    return c.goodskip.assess(snap,c,routes,los,s.waveAge,spots,nil,search,rollout)
+                end)
+            elseif not a and not planned and s.wave>=1 and s.time-lastHeavy>=1.5 and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
+                lastHeavy=s.time
+                launch("spend",s,function()
+                    local v
+                    if final then
+                        v=c.tactics.recycle(s,ts,los,workSlice)
+                        if not v then v=c.tactics.rebuild(s,ts,los,workSlice) end
+                        if v then return {action=v,goal=v.goal} end
+                    end
+                    local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
+                    local extra
+                    if liveOnly then
+                        extra={}
+                        for _,p in ipairs(near(s,ts)) do
+                            workSlice()
+                            local rank=value(base,p,ts)
+                            if rank>0 then extra[#extra+1]={pos=p,rank=rank} end
+                        end
+                        table.sort(extra,function(a,b) return a.rank>b.rank end)
+                    end
+                    v=spend(s,ts,liveOnly,extra)
+                    if v then v.reason="available_power" end
+                    return {action=v}
+                end)
+            elseif not a and #ts>0 and s.time-lastAbility>=0.5 then
+                lastAbility=s.time
+                launch("ability",s,function()
+                    for _,v in ipairs(c.ability.rank(s,c.physics,workSlice)) do
+                        if c.executor.available(v) then return {action=v} end
+                    end
+                    return {}
+                end)
             end
         end
         local top={}
@@ -524,7 +626,7 @@ function m.new(c)
             local q=ts[i]
             top[i]={id=q.id,type=q.e.type,hp=q.e.hp,eta=q.eta,etaReal=q.eta/math.max(0.01,s.speed or 1),dist=q.d,boss=q.e.boss}
         end
-        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=rescue~=nil or baseline~=nil and baseline.leaks+baseline.unknown>=s.lives,move=cursor,plannedWaveLoss=rollout.history[s.wave] and rollout.history[s.wave].loss,plannedWaveHP=rollout.history[s.wave] and rollout.history[s.wave].lives}
+        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=urgent,analysis=job and job.kind or result and result.kind,analysisMs=result and result.cpu,analysisWall=result and result.wall,analysisError=errorMessage,move=cursor,plannedWaveLoss=rollout.history[s.wave] and rollout.history[s.wave].loss,plannedWaveHP=rollout.history[s.wave] and rollout.history[s.wave].lives}
     end
     return x
 end

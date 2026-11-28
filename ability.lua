@@ -9,9 +9,10 @@ local function at(e, t, physics)
     return a:Lerp(b,math.clamp((t - 0.75) / 0.75,0,1))
 end
 
-function m.rank(s, physics)
+function m.rank(s, physics, slice)
     local out = {}
     for id,t in pairs(s.towers) do
+        if slice then slice() end
         if t.owned and t.type == "Ranger" and t.target then
             local e = s.enemies[t.target]
             if e then
@@ -25,6 +26,7 @@ function m.rank(s, physics)
                         local lead = at(e,delay,physics)
                         local fixed, moving = 0,0
                         for _,other in pairs(s.enemies) do
+                            if slice then slice() end
                             if not other.air and not other.invulnerable and not other.noDamage and not other.untargetable then
                                 local resist = math.clamp((other.resist.Explosive or 0) + (other.resist.Explosive and other.resistModifier or 0),0,1)
                                 local d = math.min(other.hp + (other.shield or 0),damage*(1-resist))

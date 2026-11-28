@@ -140,9 +140,10 @@ function m.new(common, reader, ctx, log)
         return true
     end
 
-    function x.run(a)
+    function x.run(a,snapshot)
         if not a or a.kind == "hold" or not x.available(a) then return false end
-        local s = reader.read()
+        local s=snapshot
+        if not s or a.kind=="skip" or os.clock()-s.time>0.15 then s=reader.read() end
         if not allowed(s) or not x.ready(s) then return false end
         if a.kind=="sell" and s.wave<12 or a.kind=="skip" and s.wave<1 then return false end
         local player = pc.GetLocalPlayerWrapper()

@@ -5,6 +5,7 @@ function m.new(common)
     local util = require(common.TowerUtilities)
     local data = cfg.UpgradePathData
     local r = {config = cfg}
+    local cache={}
 
     function r.valid(a, b)
         return a >= 0 and b >= 0 and a <= #data.Path1Data and b <= #data.Path2Data and not (a >= data.PathLockLevel and b >= data.PathLockLevel)
@@ -12,8 +13,10 @@ function m.new(common)
 
     function r.stats(a, b)
         assert(r.valid(a, b), "invalid levels")
+        local key=a*10+b
+        if cache[key] then return table.clone(cache[key]) end
         local s = util.GetLevelStats(data, a, b)
-        return {
+        local v={
             path1 = a, path2 = b, cost = s.TotalCost,
             damage = s.Damage, reload = s.ReloadTime,
             burstSize = s.IsBurst and s.BurstSize or 1,
@@ -23,6 +26,8 @@ function m.new(common)
             stealthDetection = s.StealthDetection,
             dps = util.CalculateAttackDataDPS(s)
         }
+        cache[key]=table.freeze(v)
+        return table.clone(v)
     end
 
     function r.upgrades(t)

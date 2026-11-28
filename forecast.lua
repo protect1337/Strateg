@@ -3,6 +3,7 @@ local m = {}
 function m.new(c)
     local f = {}
     local cfgs = {}
+    local children={}
     local waves = {}
     local all = c.economy.config.Waves
 
@@ -75,8 +76,11 @@ function m.new(c)
     end
 
     function f.children(name)
+        if children[name] then return children[name] end
         local e = entry({EnemyType = name})
-        return e and e.kids or {}
+        local kids=e and e.kids or {}
+        children[name]=kids
+        return kids
     end
 
     function f.catalog()

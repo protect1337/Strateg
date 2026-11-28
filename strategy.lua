@@ -1,4 +1,4 @@
-local m={version="adaptive-v12"}
+local m={version="adaptive-v13"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -107,6 +107,8 @@ function m.new(c,routes,los,spots)
     end
     local function simulate(s,idx,policy,stress,replay,notify,parent,keep,replaySkips,live)
         local r=routes[idx]
+        local slice=s.runtimeSlice
+        local function pause() if slice then slice() end end
         local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},skips={},time=0,loss=0,earlyLoss=0,spent=0,income=0,bonuses=0}
         local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 40
         local cursor=1
@@ -200,6 +202,7 @@ function m.new(c,routes,los,spots)
                 end
             end
             for i,item in ipairs(list) do
+                if i%16==0 then pause() end
                 local p=item.pos
                 local near=nearest[i] or math.huge
                 if near>=spacing-0.01 then
@@ -255,6 +258,7 @@ function m.new(c,routes,los,spots)
             return t,cost
         end
         local function purchase(wi,age)
+            pause()
             if z.cash<165 then return end
             if replay then
                 local a=replay[cursor]
@@ -301,6 +305,7 @@ function m.new(c,routes,los,spots)
             danger=0
             local congestion=0
             for _,e in ipairs(z.enemies) do
+                pause()
                 if not e.dead and not e.air then
                     congestion+=1
                     local d=math.floor(e.dist+0.5)
@@ -352,6 +357,7 @@ function m.new(c,routes,los,spots)
             end
             local best,affordable
             for _,v in ipairs(z.towers) do
+                pause()
                 local st=path(v.st,v.upper,opt.crossEarly)
                 if st then
                     local price=st.cost-v.st.cost
@@ -499,6 +505,8 @@ function m.new(c,routes,los,spots)
             if wi==maxWave then limit=math.max(180,w.last+r.length/0.8+30,limit) end
             local steps=math.ceil(limit/dt)
             for k=firstStep,steps-1 do
+                pause()
+                if slice and k%32==0 and s.cancel and s.cancel() then return end
                 local age=k*dt
                 z.time=start+age
                 c.physics.sludgePrune(sludge,z.time)
@@ -561,6 +569,7 @@ function m.new(c,routes,los,spots)
                     end
                 end
                 for _,t in ipairs(z.towers) do
+                    pause()
                     local st=t.st
                     if z.time+1e-6>=t.nextShot and z.time+1e-6>=t.active and z.time>=(t.stunUntil or 0) then
                         local p=t.profile
@@ -640,7 +649,7 @@ function m.new(c,routes,los,spots)
                 end
                 if k%480==0 then
                     if s.cancel and s.cancel() then return end
-                    if not live or k%960==0 then task.wait() end
+                    if not slice and (not live or k%960==0) then task.wait() end
                 end
             end
             z.time+=dt
@@ -672,7 +681,7 @@ function m.new(c,routes,los,spots)
         local delay=s.timerRemaining
         local policy=rollout.policy
         local started=os.clock()
-        local limit=3
+        local limit=s.runtimeSlice and math.min(7,math.max(2,delay/math.max(1,s.speed or 1)-1)) or 3
         local simState=table.clone(s)
         simState.cancel=function() return os.clock()-started>limit end
         local candidates={}
@@ -918,7 +927,7 @@ function m.new(c,routes,los,spots)
         end
         local plan=assert(best,"search ended without a validated plan")
         plan.ready=true
-        plan.model="adaptive_v12_time_objective_skip_branches"
+        plan.model="adaptive_v13_time_objective_skip_branches"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts
