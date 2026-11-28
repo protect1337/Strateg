@@ -188,12 +188,18 @@ function m.new(common, reader, ctx, log)
                 sell:FireServer(t.Hash)
                 return true
             elseif a.kind == "ability" then
-                if not t or queryPending[a.id] or not t.CurrentTarget or tostring(t.CurrentTarget.UniqueId)~=a.target or not s.enemies[a.target] then return false, "target_changed_before_grenade" end
+                if not t or queryPending[a.id] or not s.enemies[a.target] then return false,"ability_target_missing" end
                 local target=s.enemies[a.target]
                 local origin=ctx.physics.vec(s.towers[a.id].pos)
-                if (ctx.physics.vec(target.pos or target.pathPos)-origin).Magnitude>t:GetCurrentRange() then return false,"target_out_of_range" end
                 local ab = t.AbilityHandler.Abilities[a.name]
                 local cfg=ab and ab.Config
+                local spec=ctx.ability.spec(a.name,s.towers[a.id].abilities[a.name],t:GetCurrentRange())
+                if not spec then return false,"ability_model_missing" end
+                if not a.predictedTarget and not spec.independent and (not t.CurrentTarget or tostring(t.CurrentTarget.UniqueId)~=a.target) then return false,"target_changed_before_grenade" end
+                if (ctx.physics.vec(target.pos or target.pathPos)-origin).Magnitude>spec.range then return false,"ability_target_out_of_range" end
+                if target.hp<=0 or target.air or target.invulnerable or target.noDamage or target.untargetable or target.stasis then return false,"ability_target_invalid" end
+                a.actualGunTarget=t.CurrentTarget and tostring(t.CurrentTarget.UniqueId) or nil
+                a.serverTargetKnown=not a.predictedTarget and not spec.independent
                 if not cfg or cfg.Passive or cfg.CustomTriggered or cfg.IsManualAimAtGround or cfg.IsManualAimAtPath or cfg.ManualAimInfiniteRange then return false,"ability_not_automatic" end
                 if not ab:CanUse() or type(ab.CanAfford)=="function" and not ab:CanAfford() then return false,"ability_unavailable" end
                 p.cooldown=ab:GetCooldownRemaining()

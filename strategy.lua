@@ -1,4 +1,4 @@
-local m={version="adaptive-v23"}
+local m={version="adaptive-v24"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -11,6 +11,12 @@ function m.new(c,routes,los,spots)
     for _,v in ipairs(c.ranger.all()) do stats[v.path1*10+v.path2]=v end
     local maxRange=base.range
     for _,st in pairs(stats) do maxRange=math.max(maxRange,st.range) end
+    local abilityCatalog=c.ability.catalog(c.resources)
+    local function grenadeSpec(st)
+        if st.path2<4 then return nil end
+        local name=st.path2==5 and "GrenadeLevel2" or "GrenadeLevel1"
+        return c.ability.spec(name,abilityCatalog[name],st.range)
+    end
     local profiles={}
     local routePoints={}
     for idx,r in pairs(routes) do
@@ -108,9 +114,9 @@ function m.new(c,routes,los,spots)
     -- Explore investment-chain policies before the broad legacy search.
     local focused={}
     for i=1,24 do
-        focused[i]={allocator=3,core=1+(i-1)%3,upper=i%4==0,mix=i%4==3,crossEarly=i%3==0,depth=({18,40,75,110})[(i-1)%4+1],longRange=0.35+(i%4)*0.18,seed=i*71,risk=0.8+(i%4)*0.2,fast=false,earlySkip=false,skipDelay=0,placeBias=0.75+(i%3)*0.15,focus=1.5,capitalHorizon=45,grenades=i%2==0,legacySite=i%3==0}
+        focused[i]={allocator=3,core=1+(i-1)%3,upper=i%4==0,mix=i%4==3,crossEarly=i%3==0,depth=({18,40,75,110})[(i-1)%4+1],longRange=0.35+(i%4)*0.18,seed=i*71,risk=0.8+(i%4)*0.2,fast=false,earlySkip=false,skipDelay=0,placeBias=0.75+(i%3)*0.15,focus=1.5,capitalHorizon=45,grenades=true,legacySite=i%3==0}
     end
-    for _,p in ipairs(policies) do p.legacySite=true focused[#focused+1]=p end
+    for _,p in ipairs(policies) do p.legacySite=true p.grenades=true focused[#focused+1]=p end
     policies=focused
     local dt=0.05
     local earlyLimit=cfg.StartingLives*0.10
@@ -289,7 +295,9 @@ function m.new(c,routes,los,spots)
             z.spent+=cost
             if st.path2==5 and t.st.path2<5 then t.fireAt=z.time+0.3 end
             if st.path2>=4 and t.st.path2<st.path2 then t.grenadeAt=z.time+0.3 end
+            t.grenadeSpec=grenadeSpec(st)
             t.st=st
+            t.liveAbility=false
             t.profile=profile(t.pos,st.range,idx,slice)
             t.left=st.burstSize
             t.active=z.time+0.3
@@ -476,7 +484,8 @@ function m.new(c,routes,los,spots)
                 -- explore mass placement and flexible investment.
                 local function power(st,p)
                     local dps=st.dps or 0
-                    if policy.grenades and st.path2>=4 then dps+=st.path2==5 and 12 or 5 end
+                    local g=grenadeSpec(st)
+                    if g and not g.manual and not g.passive and not g.custom then dps+=g.damage/g.cooldown*0.65 end
                     return dps*p.length/math.max(1,r.length)
                 end
                 local focus,affordable
@@ -775,6 +784,9 @@ function m.new(c,routes,los,spots)
                     if v.stunned and stun==0 then stun=1 end
                     local up=v.path1>=3 or v.path2<3 and (v.path1>v.path2 or v.path1==v.path2 and policy.upper~=false)
                     local t={pos=pos,st=st,profile=profile(pos,st.range,idx,slice),upper=up,nextShot=shot+stun,left=left,active=z.time,stunUntil=z.time+stun,lastShot=lastShot,query=v.query or 0,fireAt=z.time+(v.abilities and v.abilities.M203 and v.abilities.M203.cooldown or 0),grenadeAt=z.time+(v.abilities and (v.abilities.GrenadeLevel2 or v.abilities.GrenadeLevel1) and (v.abilities.GrenadeLevel2 or v.abilities.GrenadeLevel1).cooldown or 0)}
+                    local name=v.abilities and (v.abilities.GrenadeLevel2 and "GrenadeLevel2" or v.abilities.GrenadeLevel1 and "GrenadeLevel1")
+                    t.grenadeSpec=name and c.ability.spec(name,v.abilities[name],v.range) or nil
+                    t.liveAbility=true
                     z.towers[#z.towers+1]=t
                 end
             end
@@ -804,6 +816,7 @@ function m.new(c,routes,los,spots)
                 while event<=#w.events and w.events[event].at<=live.age do event+=1 end
             end
             local lossBefore=z.loss
+            local grenadeBefore=z.grenadeCount or 0
             local skipped=false
             local limit=math.max(w.last or 0,cfg.Waves[wi].CustomWaveTime or 60)
             if currentLive then limit=math.max(live.age+live.delay,firstStep*dt+dt) end
@@ -832,7 +845,7 @@ function m.new(c,routes,los,spots)
                             for _,e in ipairs(z.enemies) do
                                 if not e.dead and not e.air and not e.invulnerable and not e.noDamage and not e.stasis then
                                     local pos=c.physics.at(r,e.dist)
-                                    if (pos-f.pos).Magnitude<=f.radius and (pos-f.lead).Magnitude<=f.radius then hit(e,f.damage,"Explosive",false,wi) end
+                                    if (pos-f.pos).Magnitude<=f.radius and (pos-f.lead).Magnitude<=f.radius then hit(e,f.damage,f.kind or "Explosive",false,wi) end
                                 end
                             end
                             table.remove(fires,j)
@@ -887,6 +900,60 @@ function m.new(c,routes,los,spots)
                 for _,t in ipairs(z.towers) do
                     pause()
                     local st=t.st
+                    local g=t.grenadeSpec
+                    if not g and not t.liveAbility then g=grenadeSpec(st) t.grenadeSpec=g end
+                    if g and not g.manual and not g.passive and not g.custom and z.time>=t.active and z.time>=(t.stunUntil or 0) and z.time+1e-6>=(t.grenadeAt or 0) then
+                        t.grenadeAt=z.time+0.25
+                        local target
+                        local p=profile(t.pos,g.range,idx,slice)
+                        local function eligible(e)
+                            return not e.dead and not e.air and not e.invulnerable and not e.noDamage and not e.untargetable and not e.stasis
+                        end
+                        local function order(e)
+                            if t.query==1 then return -e.dist elseif t.query==2 then return e.hp+e.shield elseif t.query==3 then return -e.hp-e.shield end
+                            return e.dist
+                        end
+                        for _,e in ipairs(z.enemies) do
+                            if eligible(e) and (not e.stealth or st.stealthDetection) then
+                                local pos=c.physics.at(r,e.dist)
+                                if (g.independent and (pos-t.pos).Magnitude<=g.range or not g.independent and p.hit[math.floor(e.dist+0.5)]) and (not target or order(e)>order(target)) then target=e end
+                            end
+                        end
+                        if target then
+                            local pos=c.physics.at(r,target.dist)
+                            local flight=c.ability.flight(t.pos,pos)
+                            local function predicted(e)
+                                local speed=(e.stopped or e.stunned or e.stasis) and 0 or e.speed or 0
+                                if (e.sludgeUntil or 0)>z.time then speed*=1.8 end
+                                local d=e.dist+speed*flight*(e.reverse and -1 or 1)
+                                if d>=r.length then return nil end
+                                return c.physics.at(r,d)
+                            end
+                            local lead=predicted(target)
+                            local radius=g.radius*0.9
+                            local damage=g.damage*(g.estimated and 0.65 or 1)
+                            local useful=0
+                            if lead then
+                                for _,e in ipairs(z.enemies) do
+                                    if eligible(e) then
+                                        local future=predicted(e)
+                                        if future and (future-pos).Magnitude<=radius and (future-lead).Magnitude<=radius then
+                                            local hp=e.hp+e.shield
+                                            local resist=math.clamp((e.resist or {})[g.kind] or 0,0,1)
+                                            local d=damage*(1-resist)*(1-math.clamp(e.allReduction or 0,0,1))
+                                            if e.maxDamage and e.maxDamage>=0 then d=math.min(d,e.maxDamage) end
+                                            useful+=math.min(hp,d)
+                                        end
+                                    end
+                                end
+                                if useful>0 then
+                                    fires[#fires+1]={grenade=true,pos=pos,lead=lead,at=z.time+flight,radius=radius,damage=damage,kind=g.kind}
+                                    t.grenadeAt=z.time+g.cooldown
+                                    z.grenadeCount=(z.grenadeCount or 0)+1
+                                end
+                            end
+                        end
+                    end
                     if z.time+1e-6>=t.nextShot and z.time+1e-6>=t.active and z.time>=(t.stunUntil or 0) then
                         local p=t.profile
                         local best
@@ -901,38 +968,6 @@ function m.new(c,routes,los,spots)
                             end
                         end
                         if best then
-                            -- Optional conservative grenade model. Only use the overlap
-                            -- of fixed-point and tracked-impact predictions; damage is
-                            -- discounted because the exact server projectile config is unverified.
-                            if policy.grenades and st.path2>=4 and z.time+1e-6>=(t.grenadeAt or 0) then
-                                local pos=c.physics.at(r,best.dist)
-                                local travel=0.15+math.max(0.15,(pos-t.pos).Magnitude/15,2*math.sqrt(math.abs(pos.Y-t.pos.Y)/120))
-                                local function predicted(e)
-                                    local speed=(e.stopped or e.stunned or e.stasis) and 0 or e.speed or 0
-                                    if (e.sludgeUntil or 0)>z.time then speed*=1.8 end
-                                    local d=e.dist+speed*travel*(e.reverse and -1 or 1)
-                                    if d>=r.length then return nil end
-                                    return c.physics.at(r,d)
-                                end
-                                local lead=predicted(best)
-                                local radius=(st.path2==5 and 4 or 3)*0.9
-                                local damage=(st.path2==5 and 100 or 75)*(policy.grenadeScale or 0.65)
-                                local useful=0
-                                if lead then
-                                    for _,e in ipairs(z.enemies) do
-                                        if not e.dead and not e.air and not e.invulnerable and not e.noDamage and not e.stasis then
-                                            local p=predicted(e)
-                                            if p and (p-pos).Magnitude<=radius and (p-lead).Magnitude<=radius then
-                                                useful+=math.min(e.hp+(e.shield or 0),damage)
-                                            end
-                                        end
-                                    end
-                                    if useful>math.max(15,st.damage*2) then
-                                        fires[#fires+1]={grenade=true,pos=pos,lead=lead,at=z.time+travel,radius=radius,damage=damage}
-                                        t.grenadeAt=z.time+(st.path2==5 and 6 or 9)
-                                    end
-                                end
-                            end
                             if st.path2==5 and z.time+1e-6>=(t.fireAt or 0) then
                                 local pos=c.physics.at(r,best.dist)
                                 local travel=math.max(0.4,(pos-t.pos).Magnitude/45)
@@ -1015,7 +1050,7 @@ function m.new(c,routes,los,spots)
             for _,e in ipairs(z.enemies) do remainingHP+=e.hp+(e.shield or 0) end
             local maxed=0
             for _,t in ipairs(z.towers) do if math.max(t.st.path1,t.st.path2)==5 then maxed+=1 end end
-            z.history[#z.history+1]={wave=wi,skipped=skipped,maxed=maxed,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies,remainingHP=remainingHP,income=z.income,spent=z.spent,bonuses=z.bonuses,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
+            z.history[#z.history+1]={wave=wi,grenadeCasts=(z.grenadeCount or 0)-grenadeBefore,skipped=skipped,maxed=maxed,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies,remainingHP=remainingHP,income=z.income,spent=z.spent,bonuses=z.bonuses,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
             if z.lives>0 and unknown==0 then checkpoint(wi) end
             if notify then notify(wi,z) end
             if z.lives<=0 or unknown>0 then break end
@@ -1025,7 +1060,7 @@ function m.new(c,routes,los,spots)
         local ledgerError=z.cash-(initialCash+z.income+z.bonuses-z.spent)
         local bossHP=0
         for _,e in ipairs(z.enemies) do if e.type=="Plague Doctor" then bossHP+=e.hp end end
-        return {blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time-(live and live.age or 0),history=z.history,moves=z.moves,skips=z.skips,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1,lastLeak=z.lastLeak,bossHP=bossHP},checkpoints
+        return {grenadeCasts=z.grenadeCount or 0,blockedMove=blockedMove,ledgerError=ledgerError,income=z.income,spent=z.spent,bonuses=z.bonuses,remainingHP=z.history[#z.history] and z.history[#z.history].remainingHP or 0,from=1,to=#z.history,targetWave=maxWave,loss=z.loss,lives=z.lives,earlyLoss=z.earlyLoss,cash=z.cash,time=z.time-(live and live.age or 0),history=z.history,moves=z.moves,skips=z.skips,complete=complete,remaining=#z.enemies,unknown=unknown,policy=policy,stress=stress,replayed=cursor-1,reusedWaves=firstWave-1,lastLeak=z.lastLeak,bossHP=bossHP},checkpoints
     end
     local function objective(v,startHP)
         local lost=math.max(0,startHP-v.lives)
@@ -1326,9 +1361,9 @@ function m.new(c,routes,los,spots)
                 local robustTime=v.time
                 local robust
                 local checkPolicy=table.clone(policy)
-                -- Ability use is not guaranteed in a real match. A winning plan
-                -- must also survive using only ordinary attacks and modeled M203.
-                checkPolicy.grenades=false
+                -- Replay the same full ability model as the search; uncertainty
+                -- is handled by explicit estimates, not by deleting abilities.
+                checkPolicy.grenades=true
                 local checks={}
                 for k in pairs(routes) do
                     local test=simulate(s,k,checkPolicy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end,nil,false,v.skips)
@@ -1372,7 +1407,7 @@ function m.new(c,routes,los,spots)
                     candidate.ready=true
                     candidate.routeLives=worst
                     candidate.checks=checks
-                    candidate.grenadeIndependent=true
+                    candidate.abilityReplay=true
                     candidate.time=robustTime
                     if not firstWinAt then firstWinAt=os.clock() firstWinAttempt=attempts end
                     local rank=robustTime+(cfg.StartingLives-worst)*2.5+robustEarly*2+#v.moves*0.001
@@ -1458,7 +1493,7 @@ function m.new(c,routes,los,spots)
                     q.depth=12+(round*19+i*11)%140
                     q.longRange=0.15+((round+i)%9)*0.13
                     q.allocator=({3,1,3,2,0})[(round+i)%5+1]
-                    q.grenades=(round+i)%2==0
+                    q.grenades=true
                     q.legacySite=(round+i)%3==0
                     q.placeBias=0.45+((round*3+i)%11)*0.14
                     q.focus=0.65+((round+i*3)%9)*0.23
@@ -1498,8 +1533,9 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v23_grenade_independent_rescue"
-        plan.grenadeModel=plan.policy.grenades and "conservative_estimate" or "disabled"
+        plan.model="adaptive_v24_shared_ability_model"
+        plan.grenadeModel="shared_catalog_and_live"
+        plan.abilityModels={GrenadeLevel1=c.ability.spec("GrenadeLevel1",abilityCatalog.GrenadeLevel1,base.range),GrenadeLevel2=c.ability.spec("GrenadeLevel2",abilityCatalog.GrenadeLevel2,base.range)}
         plan.duplicatePolicies=duplicatePolicies
         plan.duplicateResults=duplicateResults
         plan.computeTime=os.clock()-began

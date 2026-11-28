@@ -1,5 +1,39 @@
 local m={}
 
+-- Shared descriptor: live values override catalog data, with explicit estimated
+-- fallbacks for fields that the client resource manager does not expose.
+function m.spec(name,raw,range)
+    local level=name=="GrenadeLevel1" and 1 or name=="GrenadeLevel2" and 2 or nil
+    if not level then return nil end
+    raw=raw or {}
+    local p=raw.ProjectileHitData or {}
+    local function positive(a,b,fallback)
+        if type(a)=="number" and a>0 then return a end
+        if type(b)=="number" and b>0 then return b end
+        return fallback
+    end
+    local aim=raw.aimRange or (raw.CustomQueryData and raw.CustomQueryData.Range)
+    local actualDamage=positive(raw.damage,p.Damage or raw.Damage,nil)
+    local actualRadius=positive(raw.radius,p.SplashRadius or raw.EffectRadius,nil)
+    local actualCooldown=positive(raw.total,raw.Cooldown,nil)
+    return {name=name,range=positive(aim,nil,range),radius=actualRadius or (level==1 and 3 or 4),damage=actualDamage or (level==1 and 75 or 100),cooldown=actualCooldown or (level==1 and 8 or 5),kind=tostring(raw.damageType or p.DamageType or raw.DamageType or "Explosive"),independent=raw.independent==true or raw.CustomQueryData~=nil,estimated=not (actualDamage and actualRadius and actualCooldown),manual=raw.manual or raw.IsManualAimAtGround or raw.IsManualAimAtPath or raw.ManualAimInfiniteRange,passive=raw.passive or raw.Passive,custom=raw.custom or raw.CustomTriggered}
+end
+
+function m.flight(origin,target)
+    return 0.15+math.max(0.15,(target-origin).Magnitude/15,2*math.sqrt(math.abs(target.Y-origin.Y)/120))
+end
+
+function m.catalog(resources)
+    local result={}
+    for _,name in ipairs({"GrenadeLevel1","GrenadeLevel2"}) do
+        if type(resources.GetTowerAbilityConfig)=="function" then
+            local ok,cfg=pcall(resources.GetTowerAbilityConfig,name)
+            if ok and type(cfg)=="table" then result[name]=cfg end
+        end
+    end
+    return result
+end
+
 local function eligible(e)
     return e and e.hp>0 and not e.air and not e.invulnerable and not e.noDamage and not e.untargetable and not e.stasis
 end
@@ -109,19 +143,18 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
             if a.disabled or t.stunned or t.attackDisabled then metrics.disabled+=1 continue end
             if (a.cooldown or math.huge)>0 then continue end
             metrics.ready+=1
-            local radius=lv==1 and 3 or 4
-            local damage=lv==1 and 75 or 100
-            if type(a.radius)=="number" and a.radius>0 then radius=a.radius end
-            if type(a.damage)=="number" and a.damage>0 then damage=a.damage end
+            local spec=m.spec(name,a,t.range)
+            local radius,damage=spec.radius,spec.damage
             local function canTarget(v)
-                return v and (not v.e.stealth or t.stealthDetection) and (v.p-origin).Magnitude<=t.range and los(origin,v.p)
+                return v and (not v.e.stealth or t.stealthDetection) and (v.p-origin).Magnitude<=spec.range
+                    and (spec.independent or los(origin,physics.vec(v.e.pathPos or v.e.pos)))
             end
             local currentValid=canTarget(current)
             if not currentValid then
                 metrics.noTarget+=1
                 if not current then metrics.noCurrent+=1
                 elseif current.e.stealth and not t.stealthDetection then metrics.stealthTarget+=1
-                elseif (current.p-origin).Magnitude>t.range then metrics.outOfRange+=1
+                elseif (current.p-origin).Magnitude>spec.range then metrics.outOfRange+=1
                 else metrics.blockedLOS+=1 end
             end
             local choices,scores={},{}
@@ -136,8 +169,8 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
             end
             local function evaluate(v,wait)
                 local initial=position(v,wait)
-                if not initial or (initial-origin).Magnitude>t.range or not los(origin,initial) then return nil end
-                local flight=0.15+math.max(0.15,(initial-origin).Magnitude/15,2*math.sqrt(math.abs(initial.Y-origin.Y)/120))
+                if not initial or (initial-origin).Magnitude>spec.range then return nil end
+                local flight=m.flight(origin,initial)
                 local h=wait+flight
                 local lead=position(v,h)
                 if not lead then return nil end
@@ -149,7 +182,7 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
                         local trackedHit=(p-lead).Magnitude<=radius*0.9
                         if fixedHit or trackedHit then
                             local hp=remaining(q,h)
-                            local d=math.min(hp,damageOf(t,q.e,damage,"Explosive",false))
+                            local d=math.min(hp,damageOf(t,q.e,damage,spec.kind,false))
                             if fixedHit then fixed+=d end
                             if trackedHit then tracked+=d end
                             if fixedHit and trackedHit and d>0 then
@@ -165,12 +198,27 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
                 end
                 -- Only count damage surviving both impact models and normal shots.
                 if robust<=0 then return nil end
-                return {kind="ability",id=id,name=name,target=v.e.id,score=robust+4*finishGain,flight=flight,fixedValue=fixed,trackedValue=tracked,incrementalDamage=robust,hitCount=count,finishGain=finishGain,hits=hits,reason="marginal_grenade"}
+                return {kind="ability",id=id,name=name,target=v.e.id,score=robust+4*finishGain,flight=flight,fixedValue=fixed,trackedValue=tracked,incrementalDamage=robust,hitCount=count,finishGain=finishGain,hits=hits,reason="marginal_grenade",aimRange=spec.range,radius=radius,damage=damage,cooldown=spec.cooldown,estimated=spec.estimated,independent=spec.independent}
             end
             local best=currentValid and evaluate(current,0) or nil
+            -- A custom ability query is not the ordinary gun target. The target
+            -- below is a forecast, not an instruction to the server. Without a
+            -- current gun target, use the same predicted query modes as fallback.
+            if spec.independent or not currentValid then
+                local predicted=choices[(t.query or 0)+1] or choices[1]
+                if predicted then
+                    best=evaluate(predicted,0)
+                    if best then
+                        best.independent=true
+                        best.reason="ability_query_grenade"
+                        best.predictedTarget=true
+                        metrics.fallback=(metrics.fallback or 0)+1
+                    end
+                end
+            end
             local checked={}
             if currentValid then checked[current.e.id]=true end
-            if not focus then
+            if not focus and not spec.independent and currentValid then
                 for i,v in pairs(choices) do
                     if not checked[v.e.id] and i-1~=t.query then
                         checked[v.e.id]=true
@@ -187,7 +235,7 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
                 end
             end
             if best then
-                local later=currentValid and evaluate(current,0.75) or nil
+                local later=not best.predictedTarget and currentValid and evaluate(current,0.75) or nil
                 -- Waiting for a group is worthwhile only when it clearly beats firing now.
                 if later and best.kind=="ability" and later.score>best.score*1.35+10 then metrics.lowValue+=1
                 else out[#out+1]=best end

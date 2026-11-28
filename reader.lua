@@ -201,6 +201,8 @@ function m.new()
                         custom = cfg.CustomTriggered,
                         manual = cfg.IsManualAimAtGround or cfg.IsManualAimAtPath or cfg.ManualAimInfiniteRange,
                         aimRange = cfg.CustomQueryData and cfg.CustomQueryData.Range,
+                        independent = cfg.CustomQueryData~=nil,
+                        damageType = tostring(projectile and projectile.DamageType or cfg.DamageType or "Explosive"),
                         radius = projectile and projectile.SplashRadius or cfg.EffectRadius,
                         damage = projectile and projectile.Damage or cfg.Damage,
                         disabled = a:GetDisabled()
