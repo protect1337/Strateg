@@ -439,14 +439,23 @@ function m.new(c,routes,los,spots)
                 end
                 return v.damage*g.fraction,v.early*g.fraction
             end
-            local portfolio,earlyPortfolio={},{}
+            local portfolio={}
             for i,g in ipairs(future) do
                 local sum,early=0,0
                 for _,v in ipairs(z.towers) do
                     local a,b=futurePower(v.st,v.profile,g)
                     sum+=a early+=b
                 end
-                portfolio[i],earlyPortfolio[i]=sum,early
+                portfolio[i]=sum
+            end
+            if z.coverageWave~=wi then
+                local detail={}
+                for i,g in ipairs(future) do
+                    local seconds=math.max(1,(g.e.last or 0)-(g.e.first or 0)+r.length/math.max(0.1,g.e.speed or 1))
+                    detail[#detail+1]={wave=g.wi,type=g.e.type,demand=g.demand,estimatedCapacity=portfolio[i],requiredAverageDPS=g.demand/seconds,estimatedAverageDPS=portfolio[i]/seconds,deficit=math.max(0,g.demand-portfolio[i])}
+                end
+                z.coverageWave=wi
+                z.coverageBudget={routeLength=r.length,towers=#z.towers,cash=z.cash,groups=detail}
             end
             local sectorPower={}
             for _,v in ipairs(z.towers) do
@@ -504,12 +513,18 @@ function m.new(c,routes,los,spots)
             for _,v in ipairs(z.towers) do
                 pause()
                 local a,b=v.st.path1,v.st.path2
-                for _,step in ipairs({stats[(a+1)*10+b] or false,stats[a*10+b+1] or false}) do
-                    if step then
-                        consider(v,v.pos,step,step)
-                        for _,goal in ipairs(goals) do
-                            if goal.cost>step.cost and goal.path1>=step.path1 and goal.path2>=step.path2 then consider(v,v.pos,step,goal) end
+                local one,two=stats[(a+1)*10+b],stats[a*10+b+1]
+                for _,goal in ipairs(goals) do
+                    if goal.cost>v.st.cost and goal.path1>=a and goal.path2>=b then
+                        local step1=goal.path1>a and one or nil
+                        local step2=goal.path2>b and two or nil
+                        local step=step1 or step2
+                        if step1 and step2 then
+                            local rank1=gain(v.st,v.profile,step1,profile(v.pos,step1.range,idx,slice),0.45)/math.max(1,step1.cost-v.st.cost)
+                            local rank2=gain(v.st,v.profile,step2,profile(v.pos,step2.range,idx,slice),0.45)/math.max(1,step2.cost-v.st.cost)
+                            if rank2>rank1 then step=step2 end
                         end
+                        if step then consider(v,v.pos,step,goal) end
                     end
                 end
             end
@@ -525,7 +540,7 @@ function m.new(c,routes,los,spots)
                             local d=math.floor(q.e.dist+0.5)
                             live+=q.weight*(tail(item.a,d,1,last)+0.4*tail(item.b,d,1,last))
                         end
-                        ranked[#ranked+1]={pos=item.pos,a=a,b=b,live=live/math.max(1,#urgent),index=i}
+                        ranked[#ranked+1]={pos=item.pos,a=a,b=b,early=a/(1+item.a.first/30),live=live/math.max(1,#urgent),index=i}
                     end
                 end
                 local slotPrice=final and 0 or z.cash/math.max(1,math.min(cap-#z.towers,#ranked))*0.2
@@ -541,7 +556,7 @@ function m.new(c,routes,los,spots)
                         if count>=math.max(1,math.floor(breadth/3)) then break end
                     end
                 end
-                pick("a") pick("b") pick("live")
+                pick("early") pick("a") pick("b") pick("live")
                 for _,pos in ipairs(shortlist) do
                     pause()
                     for _,goal in ipairs(goals) do consider(nil,pos,base,goal,slotPrice) end
@@ -628,7 +643,7 @@ function m.new(c,routes,los,spots)
                     local stun=0
                     for _,b in pairs(v.debuffs or {}) do if b.type=="Stun" or b.type=="Freeze" then stun=math.max(stun,b.remaining or 0) end end
                     if v.stunned and stun==0 then stun=1 end
-                    local up=v.path1>=3 or v.path2<3 and (v.path1>v.path2 or v.path1==v.path2 and policy.upper~=false)
+                    local up=v.path1>v.path2
                     local t={pos=pos,st=st,profile=profile(pos,st.range,idx,slice),upper=up,nextShot=shot+stun,left=left,active=z.time,stunUntil=z.time+stun,lastShot=lastShot,query=v.query or 0,fireAt=z.time+(v.abilities and v.abilities.M203 and v.abilities.M203.cooldown or 0),grenadeAt=z.time+(v.abilities and (v.abilities.GrenadeLevel2 or v.abilities.GrenadeLevel1) and (v.abilities.GrenadeLevel2 or v.abilities.GrenadeLevel1).cooldown or 0)}
                     local name=v.abilities and (v.abilities.GrenadeLevel2 and "GrenadeLevel2" or v.abilities.GrenadeLevel1 and "GrenadeLevel1")
                     t.grenadeSpec=name and c.ability.spec(name,v.abilities[name],v.range) or nil
@@ -896,7 +911,7 @@ function m.new(c,routes,los,spots)
             for _,e in ipairs(z.enemies) do remainingHP+=e.hp+(e.shield or 0) end
             local maxed=0
             for _,t in ipairs(z.towers) do if math.max(t.st.path1,t.st.path2)==5 then maxed+=1 end end
-            z.history[#z.history+1]={wave=wi,grenadeCasts=(z.grenadeCount or 0)-grenadeBefore,skipped=skipped,maxed=maxed,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies,remainingHP=remainingHP,income=z.income,spent=z.spent,bonuses=z.bonuses,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
+            z.history[#z.history+1]={wave=wi,coverageBudget=z.coverageWave==wi and z.coverageBudget or nil,grenadeCasts=(z.grenadeCount or 0)-grenadeBefore,skipped=skipped,maxed=maxed,loss=delta,lives=z.lives,cash=z.cash,towers=#z.towers,time=z.time-start,remaining=#z.enemies,remainingHP=remainingHP,income=z.income,spent=z.spent,bonuses=z.bonuses,hpDamage=hpDamage,shieldDamage=shieldDamage,paidDamage=paidDamage,sludgeHits=sludgeHits}
             if z.lives>0 and unknown==0 then checkpoint(wi) end
             if notify then notify(wi,z) end
             if z.lives<=0 or unknown>0 then break end

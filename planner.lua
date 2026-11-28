@@ -464,7 +464,7 @@ function m.new(c)
             if st.stealthDetection and not (old and old.stealthDetection) and wi>=6 then gain+=st.dps*1.6 end
             if future<=0 or liveOnly and current<=0 then return end
             local v=(current+(liveOnly and 0 or future*gain*0.35))/math.max(1,a.price)^0.55
-            if old then v*=1.6 elseif s.towerCount>=3 then v*=0.35 end
+            -- Placement and upgrade use the same marginal-value scale.
             if not best or v>rank then best,rank=a,v end
         end
         for _,t in pairs(s.towers) do
@@ -503,7 +503,7 @@ function m.new(c)
             if not best or rank>best.rank then best={action=pack(action),goal=goal,rank=rank,gain=gain,cost=cost} end
         end
         local function delay(a,b)
-            return (0.25+((a>0 and 1 or 0)+(b>0 and 1 or 0))*0.25)*speed
+            return (0.25+(math.max(0,a)+math.max(0,b))*0.25)*speed
         end
         for _,t in pairs(s.towers) do
             workSlice()
@@ -526,7 +526,7 @@ function m.new(c)
         if s.towerCount<(s.towerLimit or 0) then
             local goals={}
             for _,st in ipairs(all) do
-                if st.cost<=s.cash and (math.max(st.path1,st.path2)==5 or st.path1==2 and st.path2==2 or st.path1==0 and st.path2==0) then goals[#goals+1]=st end
+                if st.cost<=s.cash then goals[#goals+1]=st end
             end
             local maxRange=base.range
             for _,st in ipairs(goals) do maxRange=math.max(maxRange,st.range) end
