@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/a7e796334cfc5a3e676c95122a5447b11fa2c17d/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/c8c4992085a27360ac12bd7b8c5b0d48fb54b272/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v18","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v18 | independent grenade | verified skip replay | final investment")
+    assert(ctx.strategy.version=="adaptive-v19","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v19 | marginal grenade | earlier verified skip | final investment")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -71,6 +71,9 @@ local ok, err = xpcall(function()
     local lastDecisionKey,lastDecisionAt=nil,-math.huge
     local lastSkipKey,lastSkipLogAt=nil,-math.huge
     local abilityCursor,abilityNext,abilityLastLog=0,0,-math.huge
+    local abilityFocus,restoreQuery
+    local reservedGrenades={}
+    local preferPurchase=false
 
     local function errorLog(stage, problem)
         local key = stage .. tostring(problem)
@@ -249,29 +252,68 @@ local ok, err = xpcall(function()
                     if plan.targets then
                         local n=0
                         for _,a in ipairs(plan.targets) do
-                            if executor.target(a,now) then n+=1 end
+                            if (not abilityFocus or a.id~=abilityFocus.id) and (not restoreQuery or a.id~=restoreQuery.id) and executor.target(a,now) then n+=1 end
                             if n>=3 then break end
                         end
                     end
                     if plan.skip.allowed and executor.run({kind="skip",wave=snap.wave,threat=plan.skip.threat,lives=plan.skip.lives},now) then return end
+                    for i=#reservedGrenades,1,-1 do
+                        if reservedGrenades[i].untilTime<=now.time then table.remove(reservedGrenades,i) end
+                    end
+                    if abilityFocus and (now.time>=abilityFocus.deadline or not now.towers[abilityFocus.id]) then
+                        restoreQuery=abilityFocus
+                        restoreQuery.deadline=now.time+1.5
+                        abilityFocus=nil
+                    end
+                    if restoreQuery then
+                        local t=now.towers[restoreQuery.id]
+                        if not t or t.query==restoreQuery.priorQuery or now.time>=restoreQuery.deadline then restoreQuery=nil
+                        elseif plan.analysis~="skip" and not executor.queryBusy(t.id) and t.query==restoreQuery.query then
+                            if executor.target({kind="target",id=t.id,query=restoreQuery.priorQuery,reason="grenade_restore"},now) then restoreQuery=nil end
+                        end
+                    end
+                    local buy=plan.recommendation and (plan.recommendation.kind=="upgrade" or plan.recommendation.kind=="place")
+                    if buy and (preferPurchase or plan.emergency) and executor.run(plan.recommendation,now) then
+                        preferPurchase=false
+                        return
+                    end
                     if now.wave>=1 and next(now.enemies) and now.time>=abilityNext then
                         abilityNext=now.time+0.10
-                        local ok,actions,cursor,metrics=pcall(ctx.ability.rank,now,ctx.physics,nil,8,abilityCursor)
-                        if ok then
-                            abilityCursor=cursor
-                            if now.time-abilityLastLog>=2 then
-                                abilityLastLog=now.time
-                                log.record("debug",{event="grenade_scan",wave=now.wave,abilities=metrics,candidates=#actions})
-                            end
-                            for _,a in ipairs(actions) do
-                                if executor.available(a) and executor.run(a,now) then
-                                    abilityNext=now.time+0.25
-                                    return
+                        local focus=abilityFocus and abilityFocus.id
+                        if not focus or not executor.queryBusy(focus) then
+                            local ok,actions,cursor,metrics=pcall(planner.grenades,now,abilityCursor,reservedGrenades,focus)
+                            if ok then
+                                abilityCursor=cursor
+                                if now.time-abilityLastLog>=2 then
+                                    abilityLastLog=now.time
+                                    log.record("debug",{event="grenade_scan",wave=now.wave,abilities=metrics,candidates=#actions})
                                 end
-                            end
-                        else errorLog("ability_scan",actions) end
+                                for _,a in ipairs(actions) do
+                                    if focus and a.id~=focus then continue end
+                                    if a.kind=="target" and not abilityFocus and not restoreQuery and plan.analysis~="skip" then
+                                        if executor.target(a,now) then
+                                            abilityFocus={id=a.id,query=a.query,priorQuery=a.priorQuery,deadline=now.time+1.2}
+                                            break
+                                        end
+                                    elseif a.kind=="ability" and executor.available(a) then
+                                        if executor.run(a,now) then
+                                            local impact=now.time+a.flight/math.max(1,now.speed or 1)
+                                            reservedGrenades[#reservedGrenades+1]={impact=impact,untilTime=impact+0.3,hits=a.hits}
+                                            abilityNext=now.time+0.15
+                                            preferPurchase=true
+                                            if abilityFocus and abilityFocus.id==a.id then
+                                                restoreQuery=abilityFocus
+                                                restoreQuery.deadline=now.time+1.5
+                                                abilityFocus=nil
+                                            end
+                                            return
+                                        end
+                                    end
+                                end
+                            else errorLog("ability_scan",actions) end
+                        end
                     end
-                    executor.run(plan.recommendation,now)
+                    if executor.run(plan.recommendation,now) then preferPurchase=false end
                 end, debug.traceback)
                 if not success then errorLog("planner", problem) end
                 worker = false
