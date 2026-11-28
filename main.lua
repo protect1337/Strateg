@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/d8930ca6751d9e05acebb7b2360538bf0854ff39/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/b378f69dec178e4ae64a0b5b6e87769b3cec1e31/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -29,8 +29,8 @@ local ok, err = xpcall(function()
     ctx.combat.configure(ctx.ability,ctx.resources)
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v24","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v24 | shared ability model | cast reconciliation | verified skip")
+    assert(ctx.strategy.version=="adaptive-v25","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v25 | independent ability confirmation | winning policy repair | verified skip")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -244,7 +244,7 @@ local ok, err = xpcall(function()
             worker = true
             task.spawn(function()
                 local success, problem = xpcall(function()
-                    if not executor.ready(snap) then return end
+                    local purchaseReady=executor.ready(snap)
                     local began=os.clock()
                     local plan = planner.plan(snap)
                     if not plan then return end
@@ -287,7 +287,8 @@ local ok, err = xpcall(function()
                             if n>=3 then break end
                         end
                     end
-                    if plan.skip.allowed and executor.run({kind="skip",wave=snap.wave,threat=plan.skip.threat,lives=plan.skip.lives},now) then return end
+                    local skipSent=purchaseReady and plan.skip.allowed and executor.run({kind="skip",wave=snap.wave,threat=plan.skip.threat,lives=plan.skip.lives},now)
+                    if skipSent then purchaseReady=false end
                     for i=#reservedGrenades,1,-1 do
                         if reservedGrenades[i].untilTime<=now.time then table.remove(reservedGrenades,i) end
                     end
@@ -304,9 +305,9 @@ local ok, err = xpcall(function()
                         end
                     end
                     local buy=plan.recommendation and (plan.recommendation.kind=="upgrade" or plan.recommendation.kind=="place")
-                    if buy and (preferPurchase or plan.recommendation.reason=="emergency_intercept") and executor.run(plan.recommendation,now) then
+                    if purchaseReady and buy and (preferPurchase or plan.recommendation.reason=="emergency_intercept") and executor.run(plan.recommendation,now) then
                         preferPurchase=false
-                        return
+                        purchaseReady=false
                     end
                     if now.wave>=1 and next(now.enemies) and now.time>=abilityNext then
                         abilityNext=now.time+0.10
@@ -326,7 +327,7 @@ local ok, err = xpcall(function()
                                             abilityFocus={id=a.id,query=a.query,priorQuery=a.priorQuery,deadline=now.time+1.2}
                                             break
                                         end
-                                    elseif a.kind=="ability" and executor.available(a) then
+                                    elseif a.kind=="ability" and not executor.abilityBusy(a.id) and executor.available(a) then
                                         if executor.run(a,now) then
                                             local impact=now.time+a.flight/math.max(1,now.speed or 1)
                                             reservedGrenades[#reservedGrenades+1]={impact=impact,untilTime=impact+0.3,hits=a.hits}
@@ -337,14 +338,14 @@ local ok, err = xpcall(function()
                                                 restoreQuery.deadline=now.time+1.5
                                                 abilityFocus=nil
                                             end
-                                            return
+                                            break
                                         end
                                     end
                                 end
                             else errorLog("ability_scan",actions) end
                         end
                     end
-                    if executor.run(plan.recommendation,now) then preferPurchase=false end
+                    if purchaseReady and executor.run(plan.recommendation,now) then preferPurchase=false end
                 end, debug.traceback)
                 if not success then errorLog("planner", problem) end
                 worker = false
