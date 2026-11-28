@@ -22,7 +22,7 @@ function m.new(c)
         if os.clock()-j.sliceAt>=j.budget then
             j.cpu+=os.clock()-j.sliceAt
             local frame=task.wait()
-            j.budget=frame>0.033 and 0.00065 or frame>0.022 and 0.001 or 0.0015
+            j.budget=frame>0.010 and 0.0003 or frame>0.006 and 0.00045 or 0.00075
             j.sliceAt=os.clock()
         end
         if j.cancelled then error("strateg_cancelled",0) end
@@ -37,7 +37,7 @@ function m.new(c)
     end
     local function launch(kind,s,fn)
         if job then return end
-        local j={kind=kind,s=s,cpu=0,sliceAt=os.clock(),budget=0.0015}
+        local j={kind=kind,s=s,cpu=0,sliceAt=os.clock(),budget=0.00075}
         job=j
         task.spawn(function()
             j.thread=coroutine.running()
@@ -528,13 +528,13 @@ function m.new(c)
                     elseif not a and v.targets then targets=v.targets end
                 elseif result.kind=="skip" then
                     skip=v
-                    if skip.allowed and skip.plan and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>1 then
+                    if skip.allowed and (skip.plan or skip.prepared) and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>1 then
                         local hp=0
                         for _,e in pairs(s.enemies) do hp+=e.hp+(e.shield or 0) end
                         if hp<=skip.threat+math.max(8,skip.threat*0.05) and s.lives>=skip.lives then
-                            skipContinuation={wave=s.wave,at=s.time,plan=skip.plan}
+                            if skip.plan then skipContinuation={wave=s.wave,at=s.time,plan=skip.plan} end
                         else skip.allowed=false skip.reason="forecast_changed" end
-                    else skip.allowed=false end
+                    else if skip.allowed then skip.reason="vote_window_closed" end skip.allowed=false end
                     skip.plan=nil
                 elseif result.kind=="spend" and not a and not planned and v.action and valid(v.action,s) then
                     a=v.action queued=v.goal
@@ -559,7 +559,7 @@ function m.new(c)
         local skipKey=string.format("%d:%d:%d:%d:%d",s.wave,s.towerCount,levels,math.floor(s.lives/10),math.floor(s.cash/500))
         local skipChanged=skipKey~=lastSkipKey or s.time-lastSkip>=12
         local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>2
-            and (not plannedSkip or s.waveAge>=plannedSkip-2 or not a)
+            and (not plannedSkip or s.waveAge>=plannedSkip-3.5*(s.speed or 1) or not a)
         if not job and not skip.allowed and not errorMessage then
             if urgent and s.time-lastEmergency>=3 and (emergencyKey~=lastEmergencyKey or s.time-lastEmergency>=7) then
                 lastEmergency=s.time lastEmergencyKey=emergencyKey
@@ -590,12 +590,13 @@ function m.new(c)
                     end
                     return {action=action,baseline=b,goal=goal,sold=sold,targets=targetActions}
                 end)
-            elseif dueSkip and not queued and skipChanged and s.time-lastSkip>=5 and (not a or plannedSkip and s.waveAge>=plannedSkip-1) then
+            elseif dueSkip and not queued and skipChanged and s.time-lastSkip>=5 and (not a or plannedSkip and s.waveAge>=plannedSkip-3.5*(s.speed or 1)) then
                 lastSkip=s.time lastSkipKey=skipKey
                 local snap=table.clone(s)
+                local moveIndex=cursor
                 snap.runtimeSlice=workSlice
                 launch("skip",s,function()
-                    return c.goodskip.assess(snap,c,routes,los,s.waveAge,spots,nil,search,rollout)
+                    return c.goodskip.assess(snap,c,routes,los,s.waveAge,spots,nil,search,rollout,moveIndex)
                 end)
             elseif not a and not planned and s.wave>=1 and s.time-lastHeavy>=1.5 and (s.cash>=1500 or #ts>0 and s.cash>=165 or not next(s.towers) or baseline and baseline.leaks>0) then
                 lastHeavy=s.time
