@@ -796,7 +796,7 @@ function m.new(c)
             local q=ts[i]
             top[i]={id=q.id,type=q.e.type,hp=q.e.hp,eta=q.eta,etaReal=q.eta/math.max(0.01,s.speed or 1),dist=q.d,boss=q.e.boss}
         end
-        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=urgent and "emergency_search" or planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=urgent,analysis=job and job.kind or result and result.kind,analysisMs=result and result.cpu,analysisWall=result and result.wall,analysisError=errorMessage,move=cursor,plannedWaveLoss=rollout.history[s.wave] and rollout.history[s.wave].loss,plannedWaveHP=rollout.history[s.wave] and rollout.history[s.wave].lives}
+        return {wave=s.wave,revision=s.revision,threats=top,baseline=baseline,recommendation=a or {kind="hold",reason=urgent and "emergency_search" or planned and "saving_for_verified_move" or "no_affordable_useful_action",cash=s.cash,move=planned and cursor or nil},skip=skip,mode="auto",targets=targets,emergency=urgent,analysis=job and job.kind or result and result.kind,analysisMs=result and result.cpu,analysisWall=result and result.wall,analysisError=errorMessage,move=cursor,plannedGrenadeCasts=rollout.history[s.wave] and rollout.history[s.wave].grenadeCasts,plannedWaveLoss=rollout.history[s.wave] and rollout.history[s.wave].loss,plannedWaveHP=rollout.history[s.wave] and rollout.history[s.wave].lives}
     end
     return x
 end

@@ -901,7 +901,7 @@ function m.new(c,routes,los,spots)
                     pause()
                     local st=t.st
                     local g=t.grenadeSpec
-                    if not g and not t.liveAbility then g=grenadeSpec(st) t.grenadeSpec=g end
+                    if not g and not t.liveAbility and st.path2>=4 then g=grenadeSpec(st) t.grenadeSpec=g end
                     if g and not g.manual and not g.passive and not g.custom and z.time>=t.active and z.time>=(t.stunUntil or 0) and z.time+1e-6>=(t.grenadeAt or 0) then
                         t.grenadeAt=z.time+0.25
                         local target
