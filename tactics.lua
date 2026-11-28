@@ -7,6 +7,75 @@ function m.new(c)
     local lastMap
     local replaced={}
     local cache={}
+    local saleCursor=0
+    local reachCache={}
+    local function lastReach(r,pos,range)
+        local best=-math.huge
+        for i=2,#r.points do
+            local a=r.points[i-1]
+            local v=r.points[i]-a
+            local len=v.Magnitude
+            if len>0 then
+                local u=v/len
+                local q=pos-a
+                local center=q:Dot(u)
+                local perpendicular=(q-u*center).Magnitude
+                if perpendicular<=range then
+                    local delta=math.sqrt(math.max(0,range*range-perpendicular*perpendicular))
+                    if center+delta>=0 and center-delta<=len then
+                        best=math.max(best,r.lengths[i-1]+math.min(len,center+delta))
+                    end
+                end
+            end
+        end
+        return best
+    end
+    function x.safeSales(s,routes,all,limit)
+        local w=c.forecast.wave(s.wave)
+        if not w or s.wave~=#c.economy.config.Waves or not s.waveAge or s.waveAge<w.last+1 then return {} end
+        local first={}
+        local count=0
+        for _,e in pairs(s.enemies) do
+            local r=routes[e.pathIndex]
+            if not r or not e.pathPos or e.reverse then return {} end
+            local d=c.physics.project(r,c.physics.vec(e.pathPos))
+            -- Retain coverage for delayed children, positional offsets and boss summons.
+            local back=e.boss and 24 or 6
+            first[r]=math.min(first[r] or math.huge,math.max(0,d-back))
+            count+=1
+        end
+        if count==0 then return {} end
+        local ids={}
+        for id,t in pairs(s.towers) do if t.owned and t.type=="Ranger" then ids[#ids+1]=id end end
+        table.sort(ids)
+        if #ids==0 then return {} end
+        local out={}
+        for n=1,math.min(limit or 16,#ids) do
+            saleCursor=saleCursor%#ids+1
+            local id=ids[saleCursor]
+            local t=s.towers[id]
+            if (t.sellValue or 0)<=0 or (t.target and s.enemies[t.target]) or not c.executor.available({kind="sell",id=id}) then continue end
+            local pos=c.physics.vec(t.pos)
+            local range=t.range or 0
+            for _,st in ipairs(all) do
+                if st.path1>=t.path1 and st.path2>=t.path2 then range=math.max(range,st.range) end
+            end
+            local key=string.format("%.3f:%.3f:%.3f:%.2f",pos.X,pos.Y,pos.Z,range)
+            local bounds=reachCache[key]
+            if not bounds then
+                bounds={}
+                for _,r in pairs(routes) do bounds[r]=lastReach(r,pos,range+2) end
+                reachCache[key]=bounds
+            end
+            local useless=true
+            for r,d in pairs(first) do
+                if (bounds[r] or math.huge)>=d then useless=false break end
+            end
+            if useless then out[#out+1]={kind="sell",id=id,refund=t.sellValue,reason="no_future_geometric_coverage"} end
+        end
+        table.sort(out,function(a,b) return a.refund>b.refund end)
+        return out
+    end
 
     local function routeSamples(r)
         if cache[r] then return cache[r] end
@@ -160,7 +229,7 @@ function m.new(c)
     end
 
     function x.reset(map)
-        if map~=lastMap then cache={} replaced={} lastMap=map end
+        if map~=lastMap then cache={} reachCache={} saleCursor=0 replaced={} lastMap=map end
     end
     return x
 end

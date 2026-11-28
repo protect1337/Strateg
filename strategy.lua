@@ -1,4 +1,4 @@
-local m={version="adaptive-v15"}
+local m={version="adaptive-v16"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -1177,7 +1177,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v15_capital_alternatives"
+        plan.model="adaptive_v16_capital_final_investment"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts

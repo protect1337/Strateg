@@ -57,6 +57,9 @@ function m.new(c)
     local cursor=1
     local soldWave
     local skipContinuation
+    local lastSale=-math.huge
+    local lastFinalSpend=-math.huge
+    local finalGoal
     local all=c.ranger.all()
     local base=c.ranger.stats(0,0)
 
@@ -80,6 +83,7 @@ function m.new(c)
             soldWave=nil
             skipContinuation=nil
             queued=nil
+            finalGoal=nil lastSale=-math.huge lastFinalSpend=-math.huge
             if job then job.cancelled=true end
             finished=nil cachedBaseline=nil baselineWave=nil lastEmergencyKey=nil lastSkipKey=nil lastPreparedWave=nil
         end
@@ -210,8 +214,8 @@ function m.new(c)
         return out
     end
 
-    local function value(st,pos,ts)
-        local k=string.format("%.2f:%.2f:%.2f:%d:%d:%.2f:%.2f",pos.X,pos.Y,pos.Z,st.path1,st.path2,st.range,st.dps)
+    local function value(st,pos,ts,delay)
+        local k=string.format("%.2f:%.2f:%.2f:%d:%d:%.2f:%.2f:%.2f",pos.X,pos.Y,pos.Z,st.path1,st.path2,st.range,st.dps,delay or 0)
         local group=valueCache[ts]
         if not group then group={} valueCache[ts]=group end
         if group[k]~=nil then return group[k] end
@@ -223,7 +227,7 @@ function m.new(c)
             if not e.air and not e.invulnerable and not e.noDamage and (not e.stealth or st.stealthDetection) then
                 local dps=st.dps*(st.ignoreResistance and 1 or 1-math.clamp((e.resist or {})[tostring(st.damageType)] or 0,0,1))
                 local time=0
-                for t=0.5,math.min(45,q.eta),1 do
+                for t=math.max(0.5,delay or 0),math.min(75,q.eta),1 do
                     local p=c.physics.at(q.r,q.d+q.speed*t)
                     if (p-pos).Magnitude<=st.range and los(pos,p) then time+=1 end
                 end
@@ -462,6 +466,94 @@ function m.new(c)
         if best and rank>0 then return pack(best) end
     end
 
+    local function finalInvestment(s,ts)
+        if #ts==0 or s.cash<base.cost then return end
+        local best
+        local speed=math.max(1,s.speed or 1)
+        local function consider(action,goal,gain,cost)
+            if gain<=0 or cost>s.cash or not action then return end
+            -- Money has no terminal value. Prefer earlier useful damage; cost only breaks ties.
+            local rank=gain/(1+cost/math.max(1,s.cash)*0.15)
+            if not best or rank>best.rank then best={action=pack(action),goal=goal,rank=rank,gain=gain,cost=cost} end
+        end
+        local function delay(a,b)
+            return (0.25+((a>0 and 1 or 0)+(b>0 and 1 or 0))*0.25)*speed
+        end
+        for _,t in pairs(s.towers) do
+            workSlice()
+            if t.owned and t.type=="Ranger" then
+                local old=c.ranger.stats(t.path1,t.path2)
+                local pos=c.physics.vec(t.pos)
+                local current=value(old,pos,ts)
+                for _,st in ipairs(all) do
+                    workSlice()
+                    if st.path1>=t.path1 and st.path2>=t.path2 and st.cost>old.cost and st.cost-old.cost<=s.cash then
+                        local action=nextStep(t,st,s.cash)
+                        if action then
+                            local gain=value(st,pos,ts,delay(st.path1-t.path1,st.path2-t.path2))-current
+                            consider(action,{id=t.id,pos=t.pos,path1=st.path1,path2=st.path2,live=true},gain,st.cost-old.cost)
+                        end
+                    end
+                end
+            end
+        end
+        if s.towerCount<(s.towerLimit or 0) then
+            local goals={}
+            for _,st in ipairs(all) do
+                if st.cost<=s.cash and (math.max(st.path1,st.path2)==5 or st.path1==2 and st.path2==2 or st.path1==0 and st.path2==0) then goals[#goals+1]=st end
+            end
+            local seen={}
+            local short={}
+            local samples={}
+            for i=1,math.min(4,#ts) do
+                local q=ts[i]
+                local points={}
+                for sec=1,math.min(75,q.eta),3 do points[#points+1]=c.physics.at(q.r,q.d+q.speed*sec) end
+                samples[#samples+1]={q=q,points=points}
+            end
+            local function add(pos)
+                workSlice()
+                local key=string.format("%.2f:%.2f:%.2f",pos.X,pos.Y,pos.Z)
+                if seen[key] then return end
+                seen[key]=true
+                local rough=0
+                for _,g in ipairs(samples) do
+                    for _,point in ipairs(g.points) do
+                        if (point-pos).Magnitude<=19 then rough+=1 end
+                    end
+                end
+                if rough>0 then short[#short+1]={pos=pos,rank=rough} end
+            end
+            for _,v in ipairs(spots) do add(v.pos) end
+            -- Reuse the preflight grid first; add legal forward placements when its coverage is exhausted.
+            table.sort(short,function(a,b) return a.rank>b.rank end)
+            local tested=0
+            local function assess(list)
+                for _,v in ipairs(list) do
+                    workSlice()
+                    local action={kind="place",pos=v.pos,price=base.cost}
+                    if valid(action,s) then
+                        tested+=1
+                        for _,st in ipairs(goals) do
+                            workSlice()
+                            local gain=value(st,v.pos,ts,delay(st.path1,st.path2)+0.45*speed)
+                            consider(action,{pos=c.physics.pack(v.pos),path1=st.path1,path2=st.path2,live=true},gain,st.cost)
+                        end
+                        if tested>=12 then break end
+                    end
+                end
+            end
+            assess(short)
+            if tested<4 or not best then
+                short={}
+                for _,pos in ipairs(near(s,ts)) do add(pos) end
+                table.sort(short,function(a,b) return a.rank>b.rank end)
+                assess(short)
+            end
+        end
+        return best
+    end
+
     function x.stop()
         if job then job.cancelled=true end
         finished=nil
@@ -484,7 +576,7 @@ function m.new(c)
             queued=nil
             skipContinuation=nil
         elseif skipContinuation and (s.wave>skipContinuation.wave or s.time-skipContinuation.at>5) then skipContinuation=nil end
-        if job and not sameDefense(job.s,s) then job.cancelled=true end
+        if job and not sameDefense(job.s,s) and (job.kind~="final_invest" or job.s.wave~=s.wave or job.s.map~=s.map or s.lives<job.s.lives) then job.cancelled=true end
         local ts=threat(s)
         local w=c.forecast.wave(s.wave)
         local final=s.wave==#c.economy.config.Waves and w and s.waveAge and s.waveAge>=w.last+1
@@ -506,17 +598,24 @@ function m.new(c)
             queuedAction,done=follow(s,queued,ts)
             if done then queued=nil end
         end
+        local investmentAction
+        if final and finalGoal then
+            local done
+            investmentAction,done=follow(s,finalGoal,ts)
+            if done then finalGoal=nil end
+            if investmentAction then investmentAction.reason="final_investment_chain" end
+        elseif not final then finalGoal=nil end
         local baseline=cachedBaseline
         if baselineWave~=s.wave then baseline=nil cachedBaseline=nil end
-        local a=queuedAction or plannedAction
+        local a=queuedAction or investmentAction or plannedAction
         local skip={allowed=false,reason=job and "analysis_running" or "priority"}
         local targets
         local errorMessage
         local result=finished
         finished=nil
         if result then
-            local ttl=result.kind=="skip" and 8 or result.kind=="emergency" and 4 or 2
-            local fresh=sameDefense(result.s,s) and s.time-result.s.time<=ttl
+            local ttl=result.kind=="skip" and 8 or result.kind=="emergency" and 4 or result.kind=="final_invest" and 5 or 2
+            local fresh=(sameDefense(result.s,s) or result.kind=="final_invest" and final and result.s.wave==s.wave and result.s.map==s.map and s.lives>=result.s.lives) and s.time-result.s.time<=ttl
             if result.error then errorMessage=result.error
             elseif fresh and result.result then
                 local v=result.result
@@ -537,6 +636,17 @@ function m.new(c)
                         else skip.allowed=false skip.reason="forecast_changed" end
                     else if skip.allowed then skip.reason="vote_window_closed" end skip.allowed=false end
                     skip.plan=nil
+                elseif result.kind=="final_invest" and final and not finalGoal and v.goal then
+                    local candidate,done=follow(s,v.goal,ts)
+                    if candidate and not done and valid(candidate,s) then
+                        local old=v.goal.id and s.towers[v.goal.id]
+                        local price=c.ranger.stats(v.goal.path1,v.goal.path2).cost-(old and c.ranger.stats(old.path1,old.path2).cost or 0)
+                        if price<=s.cash then
+                            finalGoal=v.goal
+                            candidate.reason="final_investment"
+                            if not queuedAction then a=candidate end
+                        end
+                    end
                 elseif result.kind=="spend" and not a and not planned and v.action and valid(v.action,s) then
                     a=v.action queued=v.goal
                 elseif result.kind=="ability" and not a and v.action and c.executor.available(v.action) then
@@ -565,7 +675,10 @@ function m.new(c)
         local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>2
             and (not plannedSkip or s.waveAge>=plannedSkip-3.5*(s.speed or 1) or not a)
         if not job and not skip.allowed and not errorMessage then
-            if urgent and s.time-lastEmergency>=3 and (emergencyKey~=lastEmergencyKey or s.time-lastEmergency>=7) then
+            if final and not finalGoal and #ts>0 and s.cash>=base.cost and s.time-lastFinalSpend>=0.5 then
+                lastFinalSpend=s.time
+                launch("final_invest",s,function() return finalInvestment(s,ts) end)
+            elseif urgent and s.time-lastEmergency>=3 and (emergencyKey~=lastEmergencyKey or s.time-lastEmergency>=7) then
                 lastEmergency=s.time lastEmergencyKey=emergencyKey
                 launch("emergency",s,function()
                     local action,b,goal,sold=emergency(s,ts,plannedAction,queuedAction)
@@ -608,8 +721,7 @@ function m.new(c)
                 launch("spend",s,function()
                     local v
                     if final then
-                        v=c.tactics.recycle(s,ts,los,workSlice)
-                        if not v then v=c.tactics.rebuild(s,ts,los,workSlice) end
+                        v=c.tactics.rebuild(s,ts,los,workSlice)
                         if v then return {action=v,goal=v.goal} end
                     end
                     local liveOnly=final or #ts>0 and (baseline and baseline.leaks>0 or s.cash<1500)
@@ -635,6 +747,18 @@ function m.new(c)
                     end
                     return {}
                 end)
+            end
+        end
+        -- Independent bounded sale scan; do not wait for the expensive investment search.
+        -- The existing confirmed action dispatcher remains the single authority for spending.
+        if final and s.time-lastSale>=0.25 then
+            local sales=c.tactics.safeSales(s,routes,all,16)
+            for _,sale in ipairs(sales) do
+                if valid(sale,s) and (not a or a.id~=sale.id) and (not finalGoal or finalGoal.id~=sale.id) then
+                    a=sale
+                    lastSale=s.time
+                    break
+                end
             end
         end
         local top={}
