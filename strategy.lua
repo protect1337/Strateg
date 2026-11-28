@@ -678,12 +678,12 @@ function m.new(c,routes,los,spots)
         local lost=math.max(0,startHP-v.lives)
         return v.time+lost*0.4+80*(lost/math.max(1,startHP))^2
     end
-    local function compareBoundary(got,ref)
+    local function compareBoundary(got,ref,wi)
         if not got or not ref then return false,"missing_checkpoint" end
         local a,b=got.z,ref.z
         if a.lives+0.01<b.lives then return false,"hp" end
         if a.cash+0.01<b.cash then return false,"cash" end
-        if #got.pending>0 or #got.sludge>0 or #got.fires>0 then return false,"pending_effects" end
+        if #got.pending>0 or #got.sludge>0 or #got.fires>0 or #ref.pending>0 or #ref.sludge>0 or #ref.fires>0 then return false,"pending_effects" end
         for _,t in ipairs(b.towers) do
             local found
             for _,v in ipairs(a.towers) do
@@ -693,6 +693,14 @@ function m.new(c,routes,los,spots)
             if (found.stunUntil or 0)>a.time or (found.smokeUntil or 0)>a.time then return false,"debuff" end
             if math.max(0,found.nextShot-a.time)>math.max(0,t.nextShot-b.time)+0.25 then return false,"cooldown" end
         end
+        local rate=0
+        for w=wi+1,maxWave do rate=math.max(rate,c.economy.income(w,1)) end
+        local function outstanding(z)
+            local sum=0
+            for _,e in ipairs(z.enemies) do if not e.noCash then sum+=math.min(e.hp,e.cashLeft or e.hp) end end
+            return sum
+        end
+        if a.cash+0.01<b.cash+math.max(0,outstanding(b)-outstanding(a))*rate then return false,"future_cash" end
         local used={}
         local enemies=table.clone(a.enemies)
         table.sort(enemies,function(x,y) return x.dist>y.dist end)
@@ -734,7 +742,7 @@ function m.new(c,routes,los,spots)
             local v,cps=simulate(simState,idx,rollout.policy,false,moves,nil,nil,true,skips,{wave=wi,age=s.waveAge,delay=s.timerRemaining,freezePurchases=true,endWave=wi+1,history=rollout.history})
             if not v then return nil,"short_budget" end
             if v.to~=wi+1 or v.replayed~=#moves or v.unknown>0 or v.loss>0.01 or math.abs(v.ledgerError)>0.01 then return nil,"short_replay" end
-            local ok,why=compareBoundary(cps[wi+1],ref)
+            local ok,why=compareBoundary(cps[wi+1],ref,wi+1)
             if not ok then return nil,"boundary_"..why end
             worst=math.min(worst,v.lives)
         end
@@ -744,6 +752,7 @@ function m.new(c,routes,los,spots)
         return {allowed=true,prepared=true,reason="prepared_checkpoint_skip",tested=1,predictedLoss=0,checkpointWave=wi+1,checkpointHP=worst,threat=threat,lives=s.lives,delay=s.timerRemaining,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1)}
     end
     function x.compareSkips(s,rollout,cursor)
+        local started=os.clock()
         local quick,why=x.preparedSkip(s,rollout,cursor)
         if quick then return quick end
         if not s.waveAge or not s.timerRemaining or s.timerRemaining<1.5 or s.wave>=maxWave then return {allowed=false,reason="no_window"} end
@@ -751,7 +760,6 @@ function m.new(c,routes,los,spots)
         local age=s.waveAge
         local delay=s.timerRemaining
         local policy=rollout.policy
-        local started=os.clock()
         local limit=s.runtimeSlice and math.min(7,math.max(2,delay/math.max(1,s.speed or 1)-1)) or 3
         local simState=table.clone(s)
         simState.cancel=function() return os.clock()-started>limit end

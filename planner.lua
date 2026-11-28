@@ -12,6 +12,7 @@ function m.new(c)
     local valueCache=setmetatable({},{__mode="k"})
     local job,finished
     local lastSkipKey
+    local lastPreparedWave
     local lastHeavy=-math.huge
     local lastAbility=-math.huge
     local heavyMs=0
@@ -80,7 +81,7 @@ function m.new(c)
             skipContinuation=nil
             queued=nil
             if job then job.cancelled=true end
-            finished=nil cachedBaseline=nil baselineWave=nil lastEmergencyKey=nil lastSkipKey=nil
+            finished=nil cachedBaseline=nil baselineWave=nil lastEmergencyKey=nil lastSkipKey=nil lastPreparedWave=nil
         end
         return true
     end
@@ -556,8 +557,11 @@ function m.new(c)
         local levels=0
         for _,t in pairs(s.towers) do levels+=(t.path1 or 0)+(t.path2 or 0) end
         local plannedSkip=rollout.skips and rollout.skips[s.wave]
+        local plannedDue=plannedSkip and s.waveAge and s.waveAge+3.5*(s.speed or 1)>=plannedSkip
+        local preparedDue=plannedDue and lastPreparedWave~=s.wave
+        if preparedDue and job and job.kind=="skip" and job.s.wave==s.wave and job.s.waveAge+3.5*(job.s.speed or 1)<plannedSkip then job.cancelled=true end
         local skipKey=string.format("%d:%d:%d:%d:%d",s.wave,s.towerCount,levels,math.floor(s.lives/10),math.floor(s.cash/500))
-        local skipChanged=skipKey~=lastSkipKey or s.time-lastSkip>=12
+        local skipChanged=preparedDue or skipKey~=lastSkipKey or s.time-lastSkip>=12
         local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>2
             and (not plannedSkip or s.waveAge>=plannedSkip-3.5*(s.speed or 1) or not a)
         if not job and not skip.allowed and not errorMessage then
@@ -590,8 +594,9 @@ function m.new(c)
                     end
                     return {action=action,baseline=b,goal=goal,sold=sold,targets=targetActions}
                 end)
-            elseif dueSkip and not queued and skipChanged and s.time-lastSkip>=5 and (not a or plannedSkip and s.waveAge>=plannedSkip-3.5*(s.speed or 1)) then
+            elseif dueSkip and not queued and skipChanged and (preparedDue or s.time-lastSkip>=5) and (not a or plannedSkip and s.waveAge>=plannedSkip-3.5*(s.speed or 1)) then
                 lastSkip=s.time lastSkipKey=skipKey
+                if plannedDue then lastPreparedWave=s.wave end
                 local snap=table.clone(s)
                 local moveIndex=cursor
                 snap.runtimeSlice=workSlice

@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v13","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v13 | victory search | sliced live analysis")
+    assert(ctx.strategy.version=="adaptive-v14","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v14 | victory search | checkpoint skips")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -219,7 +219,9 @@ local ok, err = xpcall(function()
                         local a=plan.recommendation
                         local b=plan.baseline
                         local pendingLogs,droppedLogs,writeMs=log.metrics()
-                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,move=plan.move,computeMs=(os.clock()-began)*1000,targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount,fps=frames/math.max(0.001,frameTime),maxFrameMs=frameMax*1000,slowFrames=slowFrames,readerMs=readerMs,observeMs=observeMs,logWriteMs=writeMs,pendingLogs=pendingLogs,droppedLogs=droppedLogs,analysis=plan.analysis,analysisMs=plan.analysisMs,analysisWall=plan.analysisWall})
+                        local maxed=0
+                        for _,t in pairs(snap.towers) do if t.owned and t.type=="Ranger" and math.max(t.path1,t.path2)==5 then maxed+=1 end end
+                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,move=plan.move,computeMs=(os.clock()-began)*1000,targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount,towerLimit=snap.towerLimit,maxed=maxed,fps=frames/math.max(0.001,frameTime),maxFrameMs=frameMax*1000,slowFrames=slowFrames,readerMs=readerMs,observeMs=observeMs,logWriteMs=writeMs,pendingLogs=pendingLogs,droppedLogs=droppedLogs,analysis=plan.analysis,analysisMs=plan.analysisMs,analysisWall=plan.analysisWall})
                         frames,frameTime,frameMax,slowFrames=0,0,0,0
                     end
 
