@@ -1266,6 +1266,10 @@ function m.new(c,routes,los,spots)
                 end
                 if ok then
                     local candidate=table.clone(robust or v)
+                    candidate.coverageDiagnostics={}
+                    for _,w in ipairs(v.history) do
+                        if w.coverageBudget then candidate.coverageDiagnostics[#candidate.coverageDiagnostics+1]={wave=w.wave,budget=w.coverageBudget} end
+                    end
                     candidate.moves=v.moves
                     candidate.skips=v.skips
                     candidate.policy=checkPolicy
