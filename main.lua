@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/32bae0fe5f0f081505d4aa6d877e85470af4ce97/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/d8930ca6751d9e05acebb7b2360538bf0854ff39/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -26,10 +26,11 @@ local ok, err = xpcall(function()
         resources = require(common.ResourceManager),
         placementHandler = require(common.PlacementHandler)
     }
+    ctx.combat.configure(ctx.ability,ctx.resources)
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v23","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v23 | emergency priority | grenade-independent replay | verified skip")
+    assert(ctx.strategy.version=="adaptive-v24","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v24 | shared ability model | cast reconciliation | verified skip")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -74,6 +75,34 @@ local ok, err = xpcall(function()
     local abilityFocus,restoreQuery
     local reservedGrenades={}
     local preferPurchase=false
+    local abilityLast,abilityObserved,abilityExpected={},{},{}
+    local abilityWave
+    local function reconcile(s)
+        if not s.running and not s.outcome then return end
+        if abilityWave~=nil and (s.wave~=abilityWave or s.outcome) then
+            log.record("debug",{event="ability_reconciliation",wave=abilityWave,expected=abilityExpected[abilityWave],observed=abilityObserved[abilityWave] or 0})
+        end
+        abilityWave=s.wave
+        local nextState={}
+        for id,t in pairs(s.towers or {}) do
+            if t.owned then
+                for name,a in pairs(t.abilities or {}) do
+                    if name=="GrenadeLevel1" or name=="GrenadeLevel2" then
+                        local key=id..":"..name
+                        local cd=a.cooldown or 0
+                        local before=abilityLast[key]
+                        if before==nil then
+                            log.record("debug",{event="ability_config",tower=id,name=name,wave=s.wave,model=ctx.ability.spec(name,a,t.range)})
+                        elseif cd>before+0.2 then
+                            abilityObserved[s.wave]=(abilityObserved[s.wave] or 0)+1
+                        end
+                        nextState[key]=cd
+                    end
+                end
+            end
+        end
+        abilityLast=nextState
+    end
 
     local function errorLog(stage, problem)
         local key = stage .. tostring(problem)
@@ -106,6 +135,7 @@ local ok, err = xpcall(function()
             local snap=reader.read()
             if not snap then return end
             snap=state.publish(snap)
+            reconcile(snap)
             readerMs=(os.clock()-readAt)*1000
             if not prev or snap.time-prev.time>=0.4 or snap.wave~=prev.wave or snap.phase~=prev.phase or snap.outcome then
                 local observedAt=os.clock()
@@ -218,6 +248,7 @@ local ok, err = xpcall(function()
                     local began=os.clock()
                     local plan = planner.plan(snap)
                     if not plan then return end
+                    if plan.plannedGrenadeCasts~=nil then abilityExpected[snap.wave]=plan.plannedGrenadeCasts end
                     if snap.time-lastDebug>=1 then
                         lastDebug=snap.time
                         local a=plan.recommendation
@@ -225,7 +256,7 @@ local ok, err = xpcall(function()
                         local pendingLogs,droppedLogs,writeMs=log.metrics()
                         local maxed=0
                         for _,t in pairs(snap.towers) do if t.owned and t.type=="Ranger" and math.max(t.path1,t.path2)==5 then maxed+=1 end end
-                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,move=plan.move,computeMs=(os.clock()-began)*1000,targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount,towerLimit=snap.towerLimit,maxed=maxed,fps=frames/math.max(0.001,frameTime),maxFrameMs=frameMax*1000,slowFrames=slowFrames,readerMs=readerMs,observeMs=observeMs,logWriteMs=writeMs,pendingLogs=pendingLogs,droppedLogs=droppedLogs,analysis=plan.analysis,analysisMs=plan.analysisMs,analysisWall=plan.analysisWall})
+                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,plannedGrenadeCasts=plan.plannedGrenadeCasts,observedGrenadeCasts=abilityObserved[snap.wave] or 0,move=plan.move,computeMs=(os.clock()-began)*1000,targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount,towerLimit=snap.towerLimit,maxed=maxed,fps=frames/math.max(0.001,frameTime),maxFrameMs=frameMax*1000,slowFrames=slowFrames,readerMs=readerMs,observeMs=observeMs,logWriteMs=writeMs,pendingLogs=pendingLogs,droppedLogs=droppedLogs,analysis=plan.analysis,analysisMs=plan.analysisMs,analysisWall=plan.analysisWall})
                         frames,frameTime,frameMax,slowFrames=0,0,0,0
                     end
 
@@ -273,7 +304,7 @@ local ok, err = xpcall(function()
                         end
                     end
                     local buy=plan.recommendation and (plan.recommendation.kind=="upgrade" or plan.recommendation.kind=="place")
-                    if buy and (preferPurchase or plan.emergency) and executor.run(plan.recommendation,now) then
+                    if buy and (preferPurchase or plan.recommendation.reason=="emergency_intercept") and executor.run(plan.recommendation,now) then
                         preferPurchase=false
                         return
                     end
