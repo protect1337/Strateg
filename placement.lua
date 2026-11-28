@@ -1,6 +1,6 @@
 local m={}
 
-function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
+function m.candidates(routes,physics,placement,ranger,team,snapshot,los,slice)
     local step=(ranger.config.Radius or 1.5)*2+0.005
     local dz=step*math.sqrt(3)/2
     local baseRange=ranger.stats(0,0).range
@@ -34,7 +34,7 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
                     if not seen[k] and (x-p.X)^2+(z-p.Z)^2<=scanRange^2 then
                         seen[k]=true
                         checks+=1
-                        if checks%100==0 then task.wait() end
+                        if slice then slice() elseif checks%100==0 then task.wait() end
                         local y=placement.GetGroundHeightAtXZ(x,z,p.Y)
                         if type(y)=="number" then
                             local pos=Vector3.new(x,y,z)
@@ -43,7 +43,8 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
                                 local early,total,up=0,0,0
                                 local sections={}
                                 for idx,points in pairs(samples) do
-                                    for _,q in ipairs(points) do
+                                    for qi,q in ipairs(points) do
+                                        if slice and qi%16==0 then slice() end
                                         local dist=(q.pos-pos).Magnitude
                                         if dist<=math.max(16,maxRange) and los(pos,q.pos) then
                                             if dist<=16 then up+=2 end
@@ -80,7 +81,8 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
     -- Preserve the original early/global shortlist and add a local shortlist
     -- for each segment, so the end of the route cannot disappear from the grid.
     local buckets={}
-    for _,v in ipairs(out) do
+    for i,v in ipairs(out) do
+        if slice and i%32==0 then slice() end
         for key,score in pairs(v.sections) do
             local bucket=buckets[key] or {}
             bucket[#bucket+1]={v=v,score=score}
@@ -91,6 +93,7 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
     for key in pairs(buckets) do keys[#keys+1]=key end
     table.sort(keys)
     for _,key in ipairs(keys) do
+        if slice then slice() end
         local bucket=buckets[key]
         table.sort(bucket,function(a,b)
             if a.score~=b.score then return a.score>b.score end

@@ -63,7 +63,7 @@ function m.new(c)
     local all=c.ranger.all()
     local base=c.ranger.stats(0,0)
 
-    local function prepare(s)
+    local function prepare(s,slice)
         if not s.map or not s.spawnIndices or #s.spawnIndices==0 then return false end
         local indices=table.clone(s.spawnIndices)
         table.sort(indices)
@@ -73,9 +73,9 @@ function m.new(c)
             routes=c.physics.routes(c.path,team,s.spawnIndices)
             if not next(routes) then return false end
             los=c.physics.los(c.map)
-            spots=c.placement.candidates(routes,c.physics,c.placementHandler,c.ranger,team,s,los)
+            spots=c.placement.candidates(routes,c.physics,c.placementHandler,c.ranger,team,s,los,slice)
             if #spots==0 then return false end
-            search=c.strategy.new(c,routes,los,spots)
+            search=c.strategy.new(c,routes,los,spots,slice)
             mapKey=key
             c.tactics.reset(key)
             rollout=nil
@@ -92,8 +92,23 @@ function m.new(c)
     end
 
     function x.preflight(s,cancel,progress)
-        if not prepare(s) then return end
+        -- Preflight also runs on the client scheduler, not a background CPU.
+        local began=os.clock()
+        local budget=0.0015
+        local cpu,peak,yields=0,0,0
+        local function slice()
+            local spent=os.clock()-began
+            if spent>=budget then
+                cpu+=spent peak=math.max(peak,spent) yields+=1
+                local frame=task.wait()
+                budget=frame>0.020 and 0.0006 or frame>0.010 and 0.001 or 0.0015
+                began=os.clock()
+                if cancel and cancel() then error("strateg_preflight_cancelled",0) end
+            end
+        end
+        if not prepare(s,slice) then return end
         local init=table.clone(s)
+        init.runtimeSlice=slice
         init.wave=0
         init.cash=c.economy.config.StartingCash
         init.lives=c.economy.config.StartingLives
@@ -103,6 +118,7 @@ function m.new(c)
         init.progress=progress
         local first,plan=search.search(init)
         if not plan then return end
+        plan.preflightPerformance={cpuSeconds=cpu,peakSliceMs=peak*1000,yields=yields,targetSliceMs=1.5}
         if plan.ready and plan.to==#c.economy.config.Waves then rollout=plan cursor=1 end
         return plan
     end

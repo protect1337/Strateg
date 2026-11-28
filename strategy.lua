@@ -1,6 +1,6 @@
-local m={version="adaptive-v29"}
+local m={version="adaptive-v30"}
 
-function m.new(c,routes,los,spots)
+function m.new(c,routes,los,spots,initSlice)
     local x={}
     local cfg=c.economy.config
     local maxWave=#cfg.Waves
@@ -21,7 +21,10 @@ function m.new(c,routes,los,spots)
     local routePoints={}
     for idx,r in pairs(routes) do
         local p={}
-        for d=0,math.ceil(r.length) do p[d]=c.physics.at(r,d) end
+        for d=0,math.ceil(r.length) do
+            if initSlice and d%32==0 then initSlice() end
+            p[d]=c.physics.at(r,d)
+        end
         routePoints[idx]=p
     end
     local function profile(pos,range,idx,slice,independent)
@@ -72,8 +75,9 @@ function m.new(c,routes,los,spots)
         if mode==1 then return -d elseif mode==2 then return hp elseif mode==3 then return -hp end
         return d
     end
-    local function allocate(buckets,result,width,mode)
+    local function allocate(buckets,result,width,mode,slice)
         for k,bucket in pairs(buckets) do
+            if slice then slice() end
             local entries={}
             local total=0
             for id,v in pairs(bucket) do
@@ -124,6 +128,7 @@ function m.new(c,routes,los,spots)
                         return n/(last-first)*(square(t-first-a)-square(t-last-a)-square(t-first-b)+square(t-last-b))
                     end
                     for k=math.floor(start/width),math.ceil(finish/width)-1 do
+                        if slice and k%16==0 then slice() end
                         local lo,hi=k*width,(k+1)*width
                         local mass=math.max(0,integral(hi)-integral(lo))
                         if mass>0.00001 then
@@ -144,22 +149,8 @@ function m.new(c,routes,los,spots)
             end
             if slice then slice() end
         end
-        allocate(buckets,result,width,mode)
+        allocate(buckets,result,width,mode,slice)
         p.fireBudget[key]=result
-        -- Reuse the same occupancy calculation for the other gun priorities.
-        -- Keep only compact results, not the underlying time buckets.
-        if mode~=-1 then
-            for q=0,3 do
-                local k=tostring(wi)..":"..tostring(detect==true)..":"..q
-                if not p.fireBudget[k] then
-                    local v={}
-                    for gi in pairs(result) do v[gi]={seconds=0,enemySeconds=0,earlySeconds=0} end
-                    allocate(buckets,v,width,q)
-                    p.fireBudget[k]=v
-                    if slice then slice() end
-                end
-            end
-        end
         return result
     end
     local goals=c.ranger.all()
@@ -366,7 +357,10 @@ function m.new(c,routes,los,spots)
             z.cashSampleAt=z.time
             z.cashSampleIncome=z.income
             if wi>0 and z.time<(z.portfolioAt or 0) then return end
-            z.portfolioAt=z.time+0.9
+            -- No need to rebuild the whole portfolio when neither cash nor a
+            -- scheduled target check can produce an action.
+            if wi>0 and z.cash<base.cost and z.time<(z.nextQuerySearch or 0) then return end
+            z.portfolioAt=z.time+1.35
             local horizon=opt.capitalHorizon or 30
             local final=wi==maxWave
             local function adjusted(raw,e,kind,ignore)
@@ -375,7 +369,13 @@ function m.new(c,routes,los,spots)
                 if e.maxDamage and e.maxDamage>=0 then v=math.min(v,e.maxDamage) end
                 return v
             end
+            local impactCache={}
             local function impact(st,p,e,delay)
+                local cache=impactCache[p]
+                if not cache then cache={} impactCache[p]=cache end
+                local key=st.path1..":"..st.path2..":"..e.id..":"..math.floor(delay*20+0.5)
+                local prior=cache[key]
+                if prior then return prior[1],prior[2] end
                 if e.air or e.stealth and not st.stealthDetection then return 0 end
                 local speed=math.max(0.1,e.speed or 1)
                 if (e.sludgeUntil or 0)>z.time then speed*=1.8 end
@@ -416,6 +416,7 @@ function m.new(c,routes,los,spots)
                     end
                     grenadeDamage=casts*adjusted(g.damage*(g.estimated and 0.65 or 1),e,g.kind,false)
                 end
+                cache[key]={damage,grenadeDamage}
                 return damage,grenadeDamage
             end
             -- Competition is local to each tower's firing windows, rather than
@@ -442,6 +443,7 @@ function m.new(c,routes,los,spots)
                             local b=(v.b-e.dist)/speed
                             if a<b then
                                 for k=math.floor(a/width),math.ceil(b/width)-1 do
+                                    if k%16==0 then pause() end
                                     local lo,hi=math.max(a,k*width),math.min(b,(k+1)*width)
                                     local mass=math.max(0,hi-lo)
                                     if mass>1e-6 then
@@ -457,20 +459,8 @@ function m.new(c,routes,los,spots)
                     end
                     if i%16==0 then pause() end
                 end
-                allocate(buckets,result,width,mode)
+                allocate(buckets,result,width,mode,slice)
                 cache[key]=result
-                if mode~=-1 then
-                    for q=0,3 do
-                        local k=tostring(detect==true)..":"..q
-                        if not cache[k] then
-                            local v={}
-                            for id in pairs(result) do v[id]={seconds=0,enemySeconds=0,earlySeconds=0} end
-                            allocate(buckets,v,width,q)
-                            cache[k]=v
-                            pause()
-                        end
-                    end
-                end
                 return result
             end
             local function liveDamage(st,p,e,delay,mode)
@@ -490,10 +480,14 @@ function m.new(c,routes,los,spots)
             danger=0
             for _,e in ipairs(z.enemies) do
                 if not e.dead and not e.air then
+                    pause()
                     local demand=e.hp+(e.shield or 0)+(e.extra or 0)
                     local eta=math.max(0.1,(r.length-e.dist)/math.max(0.1,e.speed or 1))
                     local capacity=0
-                    for _,v in ipairs(z.towers) do capacity+=liveDamage(v.st,v.profile,e,0,v.pendingQuery or v.query or 0) end
+                    for _,v in ipairs(z.towers) do
+                        local a,b=impact(v.st,v.profile,e,0)
+                        capacity+=(a or 0)+(b or 0)
+                    end
                     local covered=capacity
                     local weight=1+2*math.max(0,1-eta/30)
                     local deficit=math.max(0,demand-covered)
@@ -508,6 +502,18 @@ function m.new(c,routes,los,spots)
                 return a.eta<b.eta
             end)
             while #urgent>12 do table.remove(urgent) end
+            -- Refine only the most relevant live threats; the complete combat
+            -- loop still processes every enemy and every shot.
+            danger=0
+            for _,q in ipairs(urgent) do
+                local capacity=0
+                for _,v in ipairs(z.towers) do
+                    pause()
+                    capacity+=liveDamage(v.st,v.profile,q.e,0,v.pendingQuery or v.query or 0)
+                end
+                q.covered=capacity q.deficit=math.max(0,q.demand-capacity)
+                danger=math.max(danger,q.deficit/math.max(1,q.demand)*q.weight)
+            end
             local future={}
             local firstWave=math.max(1,wi)
             local nextAge=wi==0 and (cfg.SetUpTime or 15) or math.max(0,(cfg.Waves[wi].CustomWaveTime or 60)-age)
@@ -582,11 +588,20 @@ function m.new(c,routes,los,spots)
                 if nextBonus>0 and wait>nextAge then wait=nextAge+math.max(0,missing-income*nextAge-nextBonus)/income end
                 return wait
             end
-            local function gain(old,oldP,st,p,delay,oldMode,mode)
+            local function gain(old,oldP,st,p,delay,oldMode,mode,coarse)
+                pause()
                 local current,futureValue,norm,early=0,0,0,0
                 for _,q in ipairs(urgent) do
-                    local oldD=old and liveDamage(old,oldP,q.e,delay,oldMode) or 0
-                    local newD=liveDamage(st,p,q.e,delay,mode)
+                    local oldD,newD
+                    if coarse then
+                        local a,b=impact(st,p,q.e,delay)
+                        newD=(a or 0)+(b or 0)
+                        oldD=0
+                        if old then local x,y=impact(old,oldP,q.e,delay) oldD=(x or 0)+(y or 0) end
+                    else
+                        oldD=old and liveDamage(old,oldP,q.e,delay,oldMode) or 0
+                        newD=liveDamage(st,p,q.e,delay,mode)
+                    end
                     local residual=math.max(0,q.demand-math.max(0,q.covered-oldD))
                     current+=(math.min(residual,newD)-math.min(residual,oldD))*q.weight
                     if final then early+=math.max(0,newD-oldD)*0.02/math.max(1,q.eta) end
@@ -604,6 +619,12 @@ function m.new(c,routes,los,spots)
                 return current/math.max(1,#urgent)+futureValue/math.max(1,norm)+early/math.max(1,norm)*(opt.timeWeight or 0.4)
             end
             local chosen,waiting
+            local shortlistNow,shortlistWait={},{}
+            local function retainCandidate(list,item)
+                local at=#list+1
+                for i,v in ipairs(list) do if item.rank>v.rank then at=i break end end
+                if at<=6 then table.insert(list,at,item) if #list>6 then table.remove(list) end end
+            end
             local function consider(v,pos,step,goal,slotPrice)
                 local old=v and v.st
                 local price=step.cost-(old and old.cost or 0)
@@ -616,24 +637,15 @@ function m.new(c,routes,los,spots)
                 local discount=math.max(0,1-delay/horizon)
                 local oldMode=v and (v.pendingQuery or v.query or 0) or 0
                 local prof=profile(pos,goal.range,idx,slice)
-                local mode=oldMode
-                local benefit=gain(old,v and v.profile,goal,prof,delay,oldMode,mode)
-                if opt.querySearch~=false then
-                    for q=0,3 do
-                        if q~=oldMode then
-                            local alternative=gain(old,v and v.profile,goal,prof,delay+0.45,oldMode,q)
-                            if alternative>benefit+0.01 then benefit=alternative mode=q end
-                        end
-                    end
-                end
-                local rank
-                if final then rank=benefit*discount/(1+cost/math.max(1,z.cash)*0.15)
-                else rank=benefit*discount/math.max(1,cost+(slotPrice or 0))^(opt.priceExponent or 0.85) end
+                local benefit=gain(old,v and v.profile,goal,prof,delay,oldMode,oldMode,true)
+                local factor=final and discount/(1+cost/math.max(1,z.cash)*0.15) or discount/math.max(1,cost+(slotPrice or 0))^(opt.priceExponent or 0.85)
+                local rank=benefit*factor
+                -- Retain a small set for the expensive live-target calculation.
+                -- A positive optimistic score is enough to qualify.
                 if rank<=0 then return end
-                local item={v=v,pos=pos,step=step,goal=goal,rank=rank,wait=wait,query=mode,benefit=benefit}
-                if cost<=z.cash and price<=z.cash then
-                    if not chosen or rank>chosen.rank then chosen=item end
-                elseif not waiting or rank>waiting.rank then waiting=item end
+                local item={v=v,pos=pos,step=step,goal=goal,rank=rank,wait=wait,query=oldMode,benefit=benefit,delay=delay,factor=factor,profile=prof}
+                if cost<=z.cash and price<=z.cash then retainCandidate(shortlistNow,item)
+                else retainCandidate(shortlistWait,item) end
             end
             for _,v in ipairs(z.towers) do
                 pause()
@@ -646,8 +658,8 @@ function m.new(c,routes,los,spots)
                         local step=step1 or step2
                         if step1 and step2 then
                             local mode=v.pendingQuery or v.query or 0
-                            local rank1=gain(v.st,v.profile,step1,profile(v.pos,step1.range,idx,slice),0.45,mode,mode)/math.max(1,step1.cost-v.st.cost)
-                            local rank2=gain(v.st,v.profile,step2,profile(v.pos,step2.range,idx,slice),0.45,mode,mode)/math.max(1,step2.cost-v.st.cost)
+                            local rank1=gain(v.st,v.profile,step1,profile(v.pos,step1.range,idx,slice),0.45,mode,mode,true)/math.max(1,step1.cost-v.st.cost)
+                            local rank2=gain(v.st,v.profile,step2,profile(v.pos,step2.range,idx,slice),0.45,mode,mode,true)/math.max(1,step2.cost-v.st.cost)
                             if rank2>rank1 then step=step2 end
                         end
                         if step then consider(v,v.pos,step,goal) end
@@ -696,15 +708,50 @@ function m.new(c,routes,los,spots)
                     for _,goal in ipairs(goals) do consider(nil,pos,base,goal,slotPrice) end
                 end
             end
+            local function refine(list)
+                local best
+                for _,item in ipairs(list) do
+                    pause()
+                    local v=item.v
+                    local old=v and v.st
+                    local oldP=v and v.profile
+                    local oldMode=item.query
+                    local benefit=gain(old,oldP,item.goal,item.profile,item.delay,oldMode,oldMode)
+                    if opt.querySearch~=false then
+                        for q=0,3 do
+                            if q~=oldMode then
+                                local alternative=gain(old,oldP,item.goal,item.profile,item.delay+0.45,oldMode,q)
+                                if alternative>benefit+0.01 then benefit=alternative item.query=q end
+                            end
+                        end
+                    end
+                    item.benefit=benefit item.rank=benefit*item.factor
+                    if item.rank>0 and (not best or item.rank>best.rank) then best=item end
+                end
+                return best
+            end
+            chosen=refine(shortlistNow)
+            waiting=refine(shortlistWait)
             local choice=chosen
             local threatened=danger>(opt.risk or 1)
             if waiting and chosen and not final and not threatened and waiting.rank>chosen.rank*(opt.portfolioWait or 1.3) and waiting.wait<horizon*0.45 then choice=nil end
             -- Target-only changes compete independently of money.  Require a
             -- meaningful gain and time to observe the new mode before changing again.
             if opt.querySearch~=false and wi>0 and #activeEnemies>0 and z.time>=(z.nextQuerySearch or 0) then
-                z.nextQuerySearch=z.time+3
+                z.nextQuerySearch=z.time+4
                 local bestQuery
+                local queryTowers={}
                 for _,v in ipairs(z.towers) do
+                    pause()
+                    local score=0
+                    for _,q in ipairs(urgent) do
+                        if tail(v.profile,math.floor(q.e.dist+0.5),1,last)>0 then score+=1+q.deficit/math.max(1,q.demand) end
+                    end
+                    if score>0 then queryTowers[#queryTowers+1]={v=v,score=score*v.st.dps} end
+                end
+                table.sort(queryTowers,function(a,b) return a.score>b.score end)
+                for i=1,math.min(4,#queryTowers) do
+                    local v=queryTowers[i].v
                     pause()
                     local oldMode=v.pendingQuery or v.query or 0
                     if not v.pendingQuery then
@@ -730,6 +777,7 @@ function m.new(c,routes,los,spots)
                 if choice.v then t,cost=upgrade(choice.v,choice.step)
                 else t,cost=install(choice.pos,choice.goal.path1>=choice.goal.path2) end
             end
+            if not t then z.portfolioAt=z.time+2.25 end
             if t then
                 setQuery(t,choice.query)
                 z.portfolioAt=z.time+0.45
@@ -1549,7 +1597,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v29_cluster_query_windows"
+        plan.model="adaptive_v30_budgeted_candidate_search"
         plan.repairAttempts=repairAttempts
         plan.grenadeModel="shared_catalog_and_live"
         plan.abilityModels={GrenadeLevel1=c.ability.spec("GrenadeLevel1",abilityCatalog.GrenadeLevel1,base.range),GrenadeLevel2=c.ability.spec("GrenadeLevel2",abilityCatalog.GrenadeLevel2,base.range)}
