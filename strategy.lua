@@ -1,4 +1,4 @@
-local m={version="adaptive-v19"}
+local m={version="adaptive-v20"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -9,6 +9,8 @@ function m.new(c,routes,los,spots)
     local radius=base.radius or 1.5
     local spacing=radius*2+0.05
     for _,v in ipairs(c.ranger.all()) do stats[v.path1*10+v.path2]=v end
+    local maxRange=base.range
+    for _,st in pairs(stats) do maxRange=math.max(maxRange,st.range) end
     local profiles={}
     local routePoints={}
     for idx,r in pairs(routes) do
@@ -211,7 +213,7 @@ function m.new(c,routes,los,spots)
                 for i,item in ipairs(spots) do
                     local p=item.pos
                     local a=profile(p,base.range,idx,slice)
-                    if a.length>0 then list[#list+1]={i=i,pos=p,a=a,b=profile(p,20,idx,slice)} end
+                    if a.length>0 then list[#list+1]={i=i,pos=p,a=a,b=profile(p,maxRange,idx,slice)} end
                 end
                 siteProfiles[idx]=list
             end
@@ -239,7 +241,7 @@ function m.new(c,routes,los,spots)
                     if a.length>0 then
                         local density=near==math.huge and 1 or 1+0.55/(1+math.max(0,near-spacing)/spacing)
                         local depth=opt.depth or (opt.siteMode==2 and 40 or opt.siteMode==3 and 65 or 17)
-                        local early=1/(1+a.first/(wi<8 and depth or 55))
+                        local early=1/(1+a.first/math.max(1,wi<8 and depth or depth*1.5))
                         local v=(a.length+b.length*(opt.longRange or 0.55))*early*density
                         if opt.seed then v*=1+0.12*math.sin(item.i*12.9898+opt.seed*78.233) end
                         if useLive then
@@ -252,7 +254,8 @@ function m.new(c,routes,los,spots)
                                 baseReach+=tail(a,d,3,last)*weight/3
                             end
                             if (urgent or wi==maxWave) and live>0 then
-                                v=(baseReach+reach*0.35)*density
+                                v=(baseReach+reach*(opt.longRange or 0.35))*density
+                                if opt.seed then v*=1+0.12*math.sin(item.i*12.9898+opt.seed*78.233) end
                             else
                                 v*=1+math.min(3,reach*0.07)
                             end
@@ -304,7 +307,7 @@ function m.new(c,routes,los,spots)
                 return
             end
             local opt=settings(policy,wi)
-            local need=math.clamp(opt.core or 2,1,3)
+            local need=math.clamp(opt.core or 2,1,wi<=5 and 3 or math.min(cap,12))
             local elapsed=math.max(dt,z.time-(z.cashSampleAt or z.time-dt))
             local earned=math.max(0,z.income-(z.cashSampleIncome or z.income))
             local alpha=1-math.exp(-elapsed/6)
@@ -499,7 +502,7 @@ function m.new(c,routes,los,spots)
                 local choice=best and best.price<=z.cash and best or nil
                 -- Waiting is a real candidate. Only override it for an immediate danger,
                 -- using a discounted benefit comparison, not a tower-count requirement.
-                if not choice and affordable and (threatened and best and best.wait>math.max(2,horizon*0.18) or best and affordable.rank>=best.rank*0.95) then choice=affordable end
+                if not choice and affordable and (opt.spend and threatened or threatened and best and best.wait>math.max(2,horizon*0.18) or best and affordable.rank>=best.rank*0.95) then choice=affordable end
                 if choice then
                     if choice.place then
                         local upper=choice.goal.path1>choice.goal.path2 or choice.goal.path1==choice.goal.path2 and opt.upper~=false
@@ -537,6 +540,7 @@ function m.new(c,routes,los,spots)
                 if pos then
                     local upper=opt.upper~=false
                     if opt.mix and #z.towers%3==1 then upper=not upper end
+                    if opt.forceUpper~=nil then upper=opt.forceUpper end
                     local goal=stats[upper and 52 or 25] or base
                     local immediate=merit(base,pos,profile(pos,base.range,idx,slice))
                     local later=merit(goal,pos,profile(pos,goal.range,idx,slice))
@@ -546,13 +550,15 @@ function m.new(c,routes,los,spots)
                     placeOption={pos=pos,upper=upper,rank=rank}
                 end
             end
-            local choice=best and best.price<=z.cash and best or threatened and affordable or nil
+            local choice=best and best.price<=z.cash and best or (threatened or opt.spend) and affordable or nil
             if #z.towers==0 then
                 if placeOption then t,cost=install(placeOption.pos,placeOption.upper) end
             elseif opt.allocator==2 then
-                if best and best.price<=z.cash then
+                if placeOption and placeOption.rank>0 and threatened and #z.towers<need and (not affordable or placeOption.rank>=affordable.rank*(opt.placeBias or 0.9)) then
+                    t,cost=install(placeOption.pos,placeOption.upper)
+                elseif best and best.price<=z.cash then
                     t,cost=upgrade(best.t,best.st)
-                elseif threatened and affordable then
+                elseif (threatened or opt.spend) and affordable then
                     t,cost=upgrade(affordable.t,affordable.st)
                 elseif placeOption and (not best or #z.towers<need and (wi==0 or threatened) or threatened and urgent[1] and urgent[1].ratio>1.3 and placeOption.rank>best.rank*1.25) then
                     t,cost=install(placeOption.pos,placeOption.upper)
@@ -1063,7 +1069,23 @@ function m.new(c,routes,los,spots)
         local best,failed
         local pool={}
         local signatures={}
+        local policySeen={}
+        local stageBest={}
         local attempts=0
+        local duplicatePolicies=0
+        local duplicateResults=0
+        local improvedAt=0
+        local bestRank=-math.huge
+        local function policyKey(p)
+            local fields={"core","upper","mix","crossEarly","depth","longRange","seed","risk","fast","earlySkip","skipDelay","placeBias","focus","allocator","capitalHorizon","forceUpper","spend"}
+            local key={tostring(p.cancelEarly)}
+            for w=0,maxWave do
+                local v=settings(p,w)
+                for _,k in ipairs(fields) do key[#key+1]=tostring(v[k]) end
+                key[#key+1]=tostring(p.skipAges and p.skipAges[w])
+            end
+            return table.concat(key,";")
+        end
         local round=0
         local firstWinAt,firstWinAttempt
         local function stopSearch()
@@ -1096,10 +1118,12 @@ function m.new(c,routes,los,spots)
             key=table.concat(key,";")
             local rank=score(v)
             if stressTest then rank+=stressTest.to*5000+stressTest.lives*40-math.max(0,stressTest.earlyLoss-stressEarlyLimit)*100 end
-            if signatures[key] and signatures[key]>=rank then return end
+            if signatures[key] and signatures[key]>=rank then duplicateResults+=1 return end
             signatures[key]=rank
             local item={v=v,p=p,w=w or weak(v),rank=rank,stress=stressTest,key=key,checkpoints=checkpoints}
             for i=#pool,1,-1 do if pool[i].key==key then table.remove(pool,i) end end
+            if not stageBest[v.to] or item.rank>stageBest[v.to].rank then stageBest[v.to]=item end
+            if rank>bestRank then bestRank=rank improvedAt=attempts end
             pool[#pool+1]=item
             table.sort(pool,function(a,b) return a.rank>b.rank end)
             while #pool>24 do table.remove(pool) end
@@ -1108,6 +1132,9 @@ function m.new(c,routes,los,spots)
             if s.progress then s.progress(i,n,w,z.lives,phase) end
         end
         local function evaluate(policy,i,n,phase,parent)
+            local key=policyKey(policy)
+            if policySeen[key] then duplicatePolicies+=1 return true end
+            policySeen[key]=true
             attempts+=1
             local v,checkpoints=simulate(s,idx,policy,false,nil,function(w,z) report(i,n,w,z,phase) end,parent,true)
             if not v then return false end
@@ -1170,12 +1197,16 @@ function m.new(c,routes,los,spots)
             if s.cancel and s.cancel() then return end
             round+=1
             local parents=table.clone(pool)
+            local diverse={}
+            for w=1,maxWave do if stageBest[w] then diverse[#diverse+1]=stageBest[w] end end
+            local stagnating=not best and attempts-improvedAt>=48
             assert(#parents>0,"no evaluated candidates")
             local count=12
             local tested=0
             for i=1,count do
                 if s.cancel and s.cancel() then return end
                 local parent=parents[1+((round+i-2)%math.min(#parents,i%4==0 and 24 or 6))]
+                if i%4==0 and #diverse>0 then parent=diverse[1+((round+i)%#diverse)] end
                 local source=parent.stress or parent.v
                 local w=(best or i%3==0) and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
                 if parent.stress and i%3~=0 then w=parent.w end
@@ -1201,7 +1232,7 @@ function m.new(c,routes,los,spots)
                     patch.extra=math.min(30,8+round%15+i)
                     patch.expandCash=250+i%4*500
                 end
-                patch.core=math.clamp(core,1,3)
+                patch.core=math.clamp(core,1,w<=5 and 3 or 12)
                 patch.mix=i%4==0
                 patch.crossEarly=i%3==0
                 patch.focus=0.8+(i%5)*0.35
@@ -1224,8 +1255,37 @@ function m.new(c,routes,los,spots)
                     p.repairs[#p.repairs+1]=patch
                 end
                 if p.repairs and #p.repairs>18 then table.remove(p.repairs,1) end
+                -- Periodic independent restarts break the repeated elite/checkpoint basin.
+                if stagnating and i%3==1 then
+                    local q=table.clone(policies[1+((round*17+i*7)%#policies)])
+                    q.repairs=nil q.skipAges={}
+                    q.seed=round*997+i*31
+                    q.depth=12+(round*19+i*11)%140
+                    q.longRange=0.15+((round+i)%9)*0.13
+                    q.allocator=({0,1,2})[(round+i)%3+1]
+                    q.placeBias=0.45+((round*3+i)%11)*0.14
+                    q.focus=0.65+((round+i*3)%9)*0.23
+                    q.risk=0.45+((round+i)%7)*0.16
+                    q.capitalHorizon=({18,30,45,65,90})[(round+i)%5+1]
+                    q.fast=false q.earlySkip=false q.spend=true
+                    q.repairs={{from=6,to=maxWave,core=4+(round+i)%9,upper=(round+i)%2==0,mix=i%2==0,crossEarly=i%3==0,depth=q.depth,longRange=q.longRange,seed=q.seed,risk=q.risk,fast=false,allocator=q.allocator,placeBias=q.placeBias,focus=q.focus,capitalHorizon=q.capitalHorizon,spend=true}}
+                    p=q parent=nil from=0 to=maxWave
+                elseif stagnating and i%3==2 then
+                    -- Change actual combat/economic settings before the first damaging wave.
+                    local first=weak(source)
+                    from=math.max(0,first-3-(round%4))
+                    to=maxWave
+                    patch.from=from patch.to=to patch.fast=false patch.earlySkip=false
+                    patch.core=first<=5 and 3 or 4+(round+i)%9
+                    patch.spend=true patch.seed=round*101+i
+                    p=table.clone(parent.p)
+                    p.repairs=table.clone(parent.p.repairs or {})
+                    p.repairs[#p.repairs+1]=patch
+                    p.skipAges=table.clone(parent.p.skipAges or {})
+                    for w=math.max(1,from),maxWave-1 do p.skipAges[w]=-1 end
+                end
                 tested+=1
-                local phase=string.format("repair %d | weak wave %d | revise %d-%d",round,w,from,to)
+                local phase=string.format("repair %d | weak wave %d | revise %d-%d%s",round,w,from,to,stagnating and " | diversify" or "")
                 if not evaluate(p,i,count,phase,parent) then return end
                 if stopSearch() then break end
                 task.wait()
@@ -1241,7 +1301,9 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v19_marginal_grenade_earlier_skip"
+        plan.model="adaptive_v20_diverse_preflight"
+        plan.duplicatePolicies=duplicatePolicies
+        plan.duplicateResults=duplicateResults
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts
