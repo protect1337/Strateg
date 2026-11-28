@@ -146,6 +146,20 @@ function m.new(c,routes,los,spots)
         end
         allocate(buckets,result,width,mode)
         p.fireBudget[key]=result
+        -- Reuse the same occupancy calculation for the other gun priorities.
+        -- Keep only compact results, not the underlying time buckets.
+        if mode~=-1 then
+            for q=0,3 do
+                local k=tostring(wi)..":"..tostring(detect==true)..":"..q
+                if not p.fireBudget[k] then
+                    local v={}
+                    for gi in pairs(result) do v[gi]={seconds=0,enemySeconds=0,earlySeconds=0} end
+                    allocate(buckets,v,width,q)
+                    p.fireBudget[k]=v
+                    if slice then slice() end
+                end
+            end
+        end
         return result
     end
     local goals=c.ranger.all()
@@ -445,6 +459,18 @@ function m.new(c,routes,los,spots)
                 end
                 allocate(buckets,result,width,mode)
                 cache[key]=result
+                if mode~=-1 then
+                    for q=0,3 do
+                        local k=tostring(detect==true)..":"..q
+                        if not cache[k] then
+                            local v={}
+                            for id in pairs(result) do v[id]={seconds=0,enemySeconds=0,earlySeconds=0} end
+                            allocate(buckets,v,width,q)
+                            cache[k]=v
+                            pause()
+                        end
+                    end
+                end
                 return result
             end
             local function liveDamage(st,p,e,delay,mode)
@@ -1076,6 +1102,7 @@ function m.new(c,routes,los,spots)
                 if (v.pos-t.pos).Magnitude<0.1 and v.st.path1==t.st.path1 and v.st.path2==t.st.path2 and (v.query or 0)==(t.query or 0) then found=v break end
             end
             if not found then return false,"tower" end
+            if found.pendingQuery~=nil or t.pendingQuery~=nil then return false,"pending_query" end
             if (found.stunUntil or 0)>a.time or (found.smokeUntil or 0)>a.time then return false,"debuff" end
             if math.max(0,found.nextShot-a.time)>math.max(0,t.nextShot-b.time)+0.25 then return false,"cooldown" end
             if math.max(0,(found.grenadeAt or 0)-a.time)>math.max(0,(t.grenadeAt or 0)-b.time)+0.25 then return false,"grenade_cooldown" end
