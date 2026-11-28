@@ -17,12 +17,13 @@ function m.new(c)
         return out
     end
 
-    local function reach(pos,range,q,los,back)
+    local function reach(pos,range,q,los,back,slice)
         local seconds=0
         local first=math.huge
         local speed=math.max(0.1,q.speed or q.e.speed or 0)
         local d0=math.max(0,q.d-(back or 0))
-        for _,p in ipairs(routeSamples(q.r)) do
+        for i,p in ipairs(routeSamples(q.r)) do
+            if slice and i%32==0 then slice() end
             if p.d>=d0 and (p.pos-pos).Magnitude<=range and los(pos,p.pos) then
                 seconds+=2/speed
                 first=math.min(first,math.max(0,p.d-q.d)/speed)
@@ -35,21 +36,24 @@ function m.new(c)
         return reach(pos,range,q,los,back)
     end
 
-    function x.target(s,ts,los)
+    function x.target(s,ts,los,slice)
         if s.time-lastTarget<0.25 or #ts==0 then return end
         lastTarget=s.time
         local targets={}
         local assigned={}
         for _,t in pairs(s.towers) do
+            if slice then slice() end
             if t.target then assigned[t.target]=(assigned[t.target] or 0)+(t.damage or 0)/math.max(0.15,t.reload or 1) end
         end
         for _,t in pairs(s.towers) do
+            if slice then slice() end
             if t.owned and t.type=="Ranger" and not t.attackDisabled and not t.stunned and t.query~=nil then
                 local pos=c.physics.vec(t.pos)
                 local choices={}
                 local scores={}
                 local st=c.ranger.stats(t.path1,t.path2)
                 for _,q in ipairs(ts) do
+                    if slice then slice() end
                     local e=q.e
                     if not e.air and not e.invulnerable and not e.untargetable and not e.noDamage and not e.stasis and (not e.stealth or t.stealthDetection) then
                         local p=c.physics.vec(e.pos or e.pathPos)
@@ -90,7 +94,7 @@ function m.new(c)
         return targets
     end
 
-    function x.recycle(s,ts,los)
+    function x.recycle(s,ts,los,slice)
         if s.time-lastRecycle<0.35 or #ts==0 then return end
         lastRecycle=s.time
         local w=c.forecast.wave(s.wave)
@@ -98,14 +102,16 @@ function m.new(c)
         for _,e in pairs(s.enemies) do if e.reverse then return end end
         local best
         for id,t in pairs(s.towers) do
+            if slice then slice() end
             if t.owned and t.type=="Ranger" and (t.sellValue or 0)>0 and c.executor.available({kind="sell",id=id}) then
                 local st=c.ranger.stats(t.path1,t.path2)
                 local pos=c.physics.vec(t.pos)
                 local useful=t.target~=nil and s.enemies[t.target]~=nil
                 for _,q in ipairs(ts) do
+                    if slice then slice() end
                     if not q.e.air and (not q.e.stealth or st.stealthDetection) then
                         local boss=q.e.type=="Plague Doctor" or q.e.name=="Plague Doctor"
-                        local seconds=reach(pos,st.range,q,los,boss and 20 or 0)
+                        local seconds=reach(pos,st.range,q,los,boss and 20 or 0,slice)
                         if seconds>0 then useful=true break end
                     end
                 end
@@ -117,10 +123,11 @@ function m.new(c)
         return best
     end
 
-    function x.rebuild(s,ts,los)
+    function x.rebuild(s,ts,los,slice)
         if s.wave~=#c.economy.config.Waves then return end
         local best
         for id,t in pairs(s.towers) do
+            if slice then slice() end
             if t.owned and t.type=="Ranger" and t.sellValue and next(t.debuffs or {}) and c.executor.available({kind="sell",id=id}) then
                 local st=c.ranger.stats(t.path1,t.path2)
                 local pos=c.physics.vec(t.pos)
@@ -135,9 +142,10 @@ function m.new(c)
                 local delay=(0.8+(t.path1>0 and 0.25 or 0)+(t.path2>0 and 0.25 or 0))*(s.speed or 1)
                 if left<=delay+1 then continue end
                 for _,q in ipairs(ts) do
+                    if slice then slice() end
                     if q.e.boss and q.e.hp>7500 and not q.e.air and (not q.e.stealth or st.stealthDetection) then
-                        local clean,first=reach(pos,st.range,q,los,0)
-                        local weak=reach(pos,t.range,q,los,0)
+                        local clean,first=reach(pos,st.range,q,los,0,slice)
+                        local weak=reach(pos,t.range,q,los,0,slice)
                         local effective=t.stunned and 0 or st.dps*math.max(0,1+(t.buffDamageMultiplier or 0))*math.max(0,1+(t.fireMultiplier or 0))
                         local gained=st.dps*math.max(0,math.min(clean,left-first)-delay)-effective*math.min(weak,left)
                         if gained>math.max(30,cost*0.03) and (not best or gained>best.gain) then

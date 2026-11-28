@@ -28,8 +28,8 @@ local ok, err = xpcall(function()
     }
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v12","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v12 | victory search")
+    assert(ctx.strategy.version=="adaptive-v13","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v13 | victory search | sliced live analysis")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -64,6 +64,11 @@ local ok, err = xpcall(function()
     local worker = false
     local stopped = false
     local connection
+    local logBusy=false
+    local frames,frameTime,frameMax,slowFrames=0,0,0,0
+    local readerMs,observeMs=0,0
+    local lastDecisionKey,lastDecisionAt=nil,-math.huge
+    local lastSkipKey,lastSkipLogAt=nil,-math.huge
 
     local function errorLog(stage, problem)
         local key = stage .. tostring(problem)
@@ -76,21 +81,37 @@ local ok, err = xpcall(function()
     log.record("decisions", {stage = "startup", mode = "auto", difficulty = "Easy", players = 1})
     connection = rs.Heartbeat:Connect(function(dt)
         elapsed += dt
-        if elapsed < 0.05 or busy or stopped then return end
-        elapsed %= 0.05
-        busy = true
+        frames+=1 frameTime+=dt frameMax=math.max(frameMax,dt)
+        if dt>1/30 then slowFrames+=1 end
+        if not logBusy and not stopped then
+            logBusy=true
+            task.defer(function()
+                local ok,err=pcall(log.pump)
+                logBusy=false
+                if not ok then warn("[Strateg] log pump: "..tostring(err)) end
+            end)
+        end
+        if elapsed<0.10 or busy or stopped then return end
+        elapsed%=0.10
+        busy=true
 
         local success, problem = xpcall(function()
-            local snap = reader.read()
+            local readAt=os.clock()
+            local snap=reader.read()
             if not snap then return end
-            snap = state.publish(snap)
-            if not prev or snap.time-prev.time>=0.2 or snap.wave~=prev.wave or snap.phase~=prev.phase or snap.outcome then
-                log.observe(prev, snap)
-                prev = snap
+            snap=state.publish(snap)
+            readerMs=(os.clock()-readAt)*1000
+            if not prev or snap.time-prev.time>=0.4 or snap.wave~=prev.wave or snap.phase~=prev.phase or snap.outcome then
+                local observedAt=os.clock()
+                log.observe(prev,snap)
+                observeMs=(os.clock()-observedAt)*1000
+                prev=snap
             end
             if snap.outcome then
                 stopped = true
+                planner.stop()
                 connection:Disconnect()
+                task.spawn(function() while logBusy do task.wait() end log.flush() end)
                 return
             end
             if snap.voting and snap.playerCount == 1 then
@@ -195,15 +216,28 @@ local ok, err = xpcall(function()
                         lastDebug=snap.time
                         local a=plan.recommendation
                         local b=plan.baseline
-                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,move=plan.move,computeMs=math.floor((os.clock()-began)*1000),targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount})
+                        local pendingLogs,droppedLogs,writeMs=log.metrics()
+                        log.record("debug",{wave=snap.wave,cash=snap.cash,lives=snap.lives,speed=snap.speed,threats=plan.threats,action=a,skip=plan.skip,leaks=b and b.leaks,plannedLoss=b and b.plannedLoss,rescueLoss=b and b.rescueLoss,plannedWaveLoss=plan.plannedWaveLoss,plannedWaveHP=plan.plannedWaveHP,move=plan.move,computeMs=(os.clock()-began)*1000,targetChanges=plan.targets and #plan.targets or 0,towers=snap.towerCount,fps=frames/math.max(0.001,frameTime),maxFrameMs=frameMax*1000,slowFrames=slowFrames,readerMs=readerMs,observeMs=observeMs,logWriteMs=writeMs,pendingLogs=pendingLogs,droppedLogs=droppedLogs,analysis=plan.analysis,analysisMs=plan.analysisMs,analysisWall=plan.analysisWall})
+                        frames,frameTime,frameMax,slowFrames=0,0,0,0
                     end
 
 
-                    log.record("decisions", plan)
-                    log.record("skip", {wave=plan.wave,revision=plan.revision,vote=executor.canSkip(snap),result=plan.skip})
+                    if plan.analysisError then errorLog("live_analysis",plan.analysisError) end
+                    local a=plan.recommendation
+                    local p=a.pos
+                    local decisionKey=table.concat({tostring(plan.wave),a.kind or "",a.reason or "",a.id or "",tostring(a.path or ""),tostring(a.levels or ""),tostring(plan.move or ""),p and string.format("%.2f:%.2f",p.x,p.z) or "",tostring(plan.skip.allowed)},"/")
+                    if decisionKey~=lastDecisionKey or snap.time-lastDecisionAt>=1 then
+                        lastDecisionKey=decisionKey lastDecisionAt=snap.time
+                        log.record("decisions",plan)
+                    end
+                    local skipKey=table.concat({tostring(plan.wave),tostring(executor.canSkip(snap)),tostring(plan.skip.reason),tostring(plan.skip.allowed)},"/")
+                    if plan.skip.tested or skipKey~=lastSkipKey or snap.time-lastSkipLogAt>=2 then
+                        lastSkipKey=skipKey lastSkipLogAt=snap.time
+                        log.record("skip",{wave=plan.wave,revision=plan.revision,vote=executor.canSkip(snap),result=plan.skip})
+                    end
                     if plan.future then log.record("forecast", {wave = plan.wave, revision = plan.revision, future = plan.future, recommendation = plan.recommendation, goal = plan.goal, rollout = plan.rollout}) end
                     local now = state.get()
-                    if stopped or not now or now.map ~= snap.map or now.wave ~= snap.wave or now.time - snap.time > 12 then
+                    if stopped or not now or now.map ~= snap.map or now.wave ~= snap.wave or now.time - snap.time > 0.5 then
                         log.record("decisions", {event="stale_plan",wave=snap.wave,revision=snap.revision,age=now and now.time-snap.time})
                         return
                     end
@@ -214,13 +248,8 @@ local ok, err = xpcall(function()
                             if n>=3 then break end
                         end
                     end
-                    if plan.skip.allowed and executor.run({kind = "skip", wave = snap.wave, threat = plan.skip.threat, lives = plan.skip.lives}) then return end
-                    if executor.run(plan.recommendation) then return end
-                    if plan.emergency or plan.recommendation.kind=="hold" then
-                        for _, a in ipairs(ctx.ability.rank(now, ctx.physics)) do
-                            if executor.available(a) and executor.run(a) then return end
-                        end
-                    end
+                    if plan.skip.allowed and executor.run({kind="skip",wave=snap.wave,threat=plan.skip.threat,lives=plan.skip.lives},now) then return end
+                    executor.run(plan.recommendation,now)
                 end, debug.traceback)
                 if not success then errorLog("planner", problem) end
                 worker = false

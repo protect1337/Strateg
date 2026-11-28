@@ -164,7 +164,8 @@ function m.run(snapshot, routes, physics, los, action, horizon)
             if time+1e-6>=t.nextShot and time>=(t.stunUntil or 0) and (t.pendingStats or not t.activeAt or time >= t.activeAt) then
                 local best
                 local progress = -math.huge
-                for _, e in ipairs(enemies) do
+                for ei,e in ipairs(enemies) do
+                    if slice and ei%64==0 then pause() end
                     if not e.done and time >= e.spawnAt and not e.air and not e.untargetable and not e.invulnerable and not e.noDamage and not e.stasis and (not e.stealth or t.stealthDetection) and (e.pos - t.pos).Magnitude <= t.range then
                         local p = e.dist / e.route.length
                         if t.query==1 then p=-p elseif t.query==2 then p=e.hp+(e.shield or 0) elseif t.query==3 then p=-(e.hp+(e.shield or 0)) end

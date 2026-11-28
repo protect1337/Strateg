@@ -16,12 +16,13 @@ function m.new(c,routes,los,spots)
         for d=0,math.ceil(r.length) do p[d]=c.physics.at(r,d) end
         routePoints[idx]=p
     end
-    local function profile(pos,range,idx)
+    local function profile(pos,range,idx,slice)
         local k=string.format("%.3f:%.3f:%.3f:%.2f:%s",pos.X,pos.Y,pos.Z,range,tostring(idx))
         if profiles[k] then return profiles[k] end
         local hit={}
         local length,first=0,math.huge
         for d,p in pairs(routePoints[idx]) do
+            if slice and d%32==0 then slice() end
             if (p-pos).Magnitude<=range-0.2 and los(pos,p) then
                 hit[d]=true
                 length+=1
@@ -181,8 +182,8 @@ function m.new(c,routes,los,spots)
                 list={}
                 for i,item in ipairs(spots) do
                     local p=item.pos
-                    local a=profile(p,base.range,idx)
-                    if a.length>0 then list[#list+1]={i=i,pos=p,a=a,b=profile(p,20,idx)} end
+                    local a=profile(p,base.range,idx,slice)
+                    if a.length>0 then list[#list+1]={i=i,pos=p,a=a,b=profile(p,20,idx,slice)} end
                 end
                 siteProfiles[idx]=list
             end
@@ -238,7 +239,7 @@ function m.new(c,routes,los,spots)
             if not pos or not free(pos) or z.cash<base.cost or #z.towers>=cap then return false end
             z.cash-=base.cost
             z.spent+=base.cost
-            local t={pos=pos,st=base,profile=profile(pos,base.range,idx),upper=upper,nextShot=z.time+0.45,left=base.burstSize,active=z.time+0.45}
+            local t={pos=pos,st=base,profile=profile(pos,base.range,idx,slice),upper=upper,nextShot=z.time+0.45,left=base.burstSize,active=z.time+0.45}
             z.towers[#z.towers+1]=t
             return t,base.cost
         end
@@ -250,7 +251,7 @@ function m.new(c,routes,los,spots)
             z.spent+=cost
             if st.path2==5 and t.st.path2<5 then t.fireAt=z.time+0.3 end
             t.st=st
-            t.profile=profile(t.pos,st.range,idx)
+            t.profile=profile(t.pos,st.range,idx,slice)
             t.left=st.burstSize
             t.active=z.time+0.3
             t.nextShot=math.max(t.active,math.min(t.nextShot,z.time+st.reload))
@@ -363,8 +364,8 @@ function m.new(c,routes,los,spots)
                     local price=st.cost-v.st.cost
                     local goal=stats[v.upper and 52 or 25] or st
                     local old=merit(v.st,v.pos,v.profile)
-                    local gain=math.max(0,merit(st,v.pos,profile(v.pos,st.range,idx))-old)
-                    local long=math.max(0,merit(goal,v.pos,profile(v.pos,goal.range,idx))-old)
+                    local gain=math.max(0,merit(st,v.pos,profile(v.pos,st.range,idx,slice))-old)
+                    local long=math.max(0,merit(goal,v.pos,profile(v.pos,goal.range,idx,slice))-old)
                     local totalPrice=math.max(price,goal.cost-v.st.cost)
                     local level=math.max(v.st.path1,v.st.path2)
                     local rank=gain/math.max(1,price)^0.65+long/totalPrice^0.65*(opt.focus or 1)
@@ -381,8 +382,8 @@ function m.new(c,routes,los,spots)
                     local upper=opt.upper~=false
                     if opt.mix and #z.towers%3==1 then upper=not upper end
                     local goal=stats[upper and 52 or 25] or base
-                    local immediate=merit(base,pos,profile(pos,base.range,idx))
-                    local later=merit(goal,pos,profile(pos,goal.range,idx))
+                    local immediate=merit(base,pos,profile(pos,base.range,idx,slice))
+                    local later=merit(goal,pos,profile(pos,goal.range,idx,slice))
                     local rank=(immediate/base.cost^0.65+later/goal.cost^0.65*(opt.focus or 1))*(opt.placeBias or 0.9)
                     if threatened then rank*=1.3 elseif best and best.price>z.cash then rank*=0.65 end
                     if wi==0 and #z.towers>=need then rank=0 end
@@ -470,7 +471,7 @@ function m.new(c,routes,los,spots)
                     for _,b in pairs(v.debuffs or {}) do if b.type=="Stun" or b.type=="Freeze" then stun=math.max(stun,b.remaining or 0) end end
                     if v.stunned and stun==0 then stun=1 end
                     local up=v.path1>=3 or v.path2<3 and (v.path1>v.path2 or v.path1==v.path2 and policy.upper~=false)
-                    local t={pos=pos,st=st,profile=profile(pos,st.range,idx),upper=up,nextShot=shot+stun,left=left,active=z.time,stunUntil=z.time+stun,lastShot=lastShot,query=v.query or 0,fireAt=z.time+(v.abilities and v.abilities.M203 and v.abilities.M203.cooldown or 0)}
+                    local t={pos=pos,st=st,profile=profile(pos,st.range,idx,slice),upper=up,nextShot=shot+stun,left=left,active=z.time,stunUntil=z.time+stun,lastShot=lastShot,query=v.query or 0,fireAt=z.time+(v.abilities and v.abilities.M203 and v.abilities.M203.cooldown or 0)}
                     z.towers[#z.towers+1]=t
                 end
             end
@@ -574,7 +575,8 @@ function m.new(c,routes,los,spots)
                     if z.time+1e-6>=t.nextShot and z.time+1e-6>=t.active and z.time>=(t.stunUntil or 0) then
                         local p=t.profile
                         local best
-                        for _,e in ipairs(z.enemies) do
+                        for ei,e in ipairs(z.enemies) do
+                            if slice and ei%64==0 then pause() end
                             if not e.dead and not e.air and not e.invulnerable and not e.noDamage and not e.untargetable and not e.stasis and (not e.stealth or st.stealthDetection) and p.hit[math.floor(e.dist+0.5)] then
                                 local function priority(q)
                                     if t.query==1 then return -q.dist elseif t.query==2 then return q.hp+q.shield elseif t.query==3 then return -q.hp-q.shield end

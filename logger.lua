@@ -133,6 +133,7 @@ function m.new()
             l.record("economy", {wave = s.wave, players = s.playerCount, cashBefore = prev.cash, cashAfter = s.cash, damageDelta = s.damage - prev.damage, killsDelta = s.kills - prev.kills, changes = changes, observation = "sample_delta"})
         end
 
+        for id in pairs(towerSample) do if not s.towers[id] then towerSample[id]=nil end end
         local detailed=s.time-lastBurst>=1 or s.wave~=prev.wave
         if detailed then lastBurst=s.time end
         for id,t in pairs(s.towers) do

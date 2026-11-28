@@ -459,6 +459,10 @@ function m.new(c)
         if best and rank>0 then return pack(best) end
     end
 
+    function x.stop()
+        if job then job.cancelled=true end
+        finished=nil
+    end
     function x.plan(s)
         if not s.running or s.difficulty~="Easy" or s.playerCount~=1 or not s.wave then return end
         if s.time-last<0.08 then return end
