@@ -1,4 +1,4 @@
-local m={version="adaptive-v30"}
+local m={version="adaptive-v31"}
 
 function m.new(c,routes,los,spots,initSlice)
     local x={}
@@ -12,10 +12,13 @@ function m.new(c,routes,los,spots,initSlice)
     local maxRange=base.range
     for _,st in pairs(stats) do maxRange=math.max(maxRange,st.range) end
     local abilityCatalog=c.ability.catalog(c.resources)
+    local grenadeSpecs={}
     local function grenadeSpec(st)
         if st.path2<4 then return nil end
         local name=st.path2==5 and "GrenadeLevel2" or "GrenadeLevel1"
-        return c.ability.spec(name,abilityCatalog[name],st.range)
+        local key=st.path1*10+st.path2
+        if not grenadeSpecs[key] then grenadeSpecs[key]=c.ability.spec(name,abilityCatalog[name],st.range) end
+        return grenadeSpecs[key]
     end
     local profiles={}
     local routePoints={}
@@ -153,6 +156,12 @@ function m.new(c,routes,los,spots,initSlice)
         p.fireBudget[key]=result
         return result
     end
+    local minPrice=base.cost
+    for _,st in pairs(stats) do
+        for _,n in ipairs({stats[(st.path1+1)*10+st.path2] or false,stats[st.path1*10+st.path2+1] or false}) do
+            if n and n.cost>st.cost then minPrice=math.min(minPrice,n.cost-st.cost) end
+        end
+    end
     local goals=c.ranger.all()
     table.sort(goals,function(a,b)
         if a.cost~=b.cost then return a.cost<b.cost end
@@ -180,7 +189,7 @@ function m.new(c,routes,los,spots,initSlice)
     local policies={}
     -- No level, upgrade branch, or tower-count target is a policy parameter.
     for i=1,36 do
-        policies[i]={allocator=5,grenades=true,capitalHorizon=({18,30,50,75})[(i-1)%4+1],lookAhead=({2,3,5})[(i-1)%3+1],priceExponent=({0.65,0.85,1})[(i-1)%3+1],timeWeight=({0.15,0.4,0.75})[(math.floor((i-1)/3))%3+1],portfolioWait=({1,1.3,1.7})[(math.floor((i-1)/4))%3+1],risk=({0.85,1,1.2})[(i-1)%3+1],siteBreadth=({4,6,8})[(i-1)%3+1],querySearch=i%4~=0,fast=i%3~=1,earlySkip=false,skipDelay=({0,3,8,15})[(i-1)%4+1]}
+        policies[i]={allocator=5,grenades=true,capitalHorizon=({18,30,50,75})[(i-1)%4+1],lookAhead=({2,3,5})[(i-1)%3+1],priceExponent=({0.35,0.65,0.9})[(i-1)%3+1],timeWeight=({0.15,0.4,0.75})[(math.floor((i-1)/3))%3+1],portfolioWait=({1,1.3,1.7})[(math.floor((i-1)/4))%3+1],risk=({0.85,1,1.2})[(i-1)%3+1],siteBreadth=({4,6,8})[(i-1)%3+1],querySearch=i%4~=0,commitChain=i%3~=0,fast=i%3~=1,earlySkip=false,skipDelay=({0,3,8,15})[(i-1)%4+1]}
     end
     local dt=0.05
     local earlyLimit=cfg.StartingLives*0.10
@@ -194,8 +203,8 @@ function m.new(c,routes,los,spots,initSlice)
     end
     local function sameSettings(a,b)
         if a==b then return true end
-        for k,v in pairs(a) do if k~="repairs" and k~="skipAges" and b[k]~=v then return false end end
-        for k,v in pairs(b) do if k~="repairs" and k~="skipAges" and a[k]~=v then return false end end
+        for k,v in pairs(a) do if k~="repairs" and k~="skipAges" and k~="from" and k~="to" and b[k]~=v then return false end end
+        for k,v in pairs(b) do if k~="repairs" and k~="skipAges" and k~="from" and k~="to" and a[k]~=v then return false end end
         return true
     end
     local function copyList(a)
@@ -359,8 +368,54 @@ function m.new(c,routes,los,spots,initSlice)
             if wi>0 and z.time<(z.portfolioAt or 0) then return end
             -- No need to rebuild the whole portfolio when neither cash nor a
             -- scheduled target check can produce an action.
-            if wi>0 and z.cash<165 and (opt.querySearch==false or z.time<(z.nextQuerySearch or 0)) then return end
+            if wi>0 and z.cash<minPrice and (opt.querySearch==false or z.time<(z.nextQuerySearch or 0)) then return end
             z.portfolioAt=z.time+1.35
+            -- Complete a funded, previously selected investment only while it
+            -- remains reachable and in the same wave. No tier is preferred.
+            local chain=z.fundedChain
+            if chain then
+                local v
+                for _,t in ipairs(z.towers) do if (t.pos-chain.pos).Magnitude<0.1 then v=t break end end
+                local goal=stats[chain.path1*10+chain.path2]
+                local a,b=v and v.st.path1,v and v.st.path2
+                if opt.commitChain and chain.wave==wi and v and goal and goal.cost>v.st.cost and goal.cost-v.st.cost<=z.cash and goal.path1>=a and goal.path2>=b then
+                    local candidates={goal.path1>a and stats[(a+1)*10+b] or false,goal.path2>b and stats[a*10+b+1] or false}
+                    local bestStep,bestScore
+                    local w=c.forecast.wave(math.max(1,wi))
+                    for _,step in ipairs(candidates) do
+                        if step then
+                            local prof=profile(v.pos,step.range,idx,slice)
+                            local value=0
+                            for _,g in ipairs(w and w.groups or {}) do
+                                if not g.air and (not g.stealth or step.stealthDetection) then
+                                    local resist=step.ignoreResistance and 0 or math.clamp((g.resist or {})[tostring(step.damageType)] or 0,0,1)
+                                    value+=math.min(g.hp+(g.shield or 0),step.dps*(1-resist)*prof.length/math.max(0.1,g.speed or 1))*(g.count or 1)
+                                end
+                            end
+                            if not bestStep or value>bestScore then bestStep,bestScore=step,value end
+                        end
+                    end
+                    local useful=wi<maxWave
+                    if not useful then
+                        local prof=profile(v.pos,goal.range,idx,slice)
+                        local delay=0.45*(goal.path1+goal.path2-a-b)
+                        for _,e in ipairs(z.enemies) do
+                            if not e.dead and not e.air and (not e.stealth or goal.stealthDetection) and tail(prof,math.min(last,math.floor(e.dist+(e.speed or 1)*delay+0.5)),1,last)>0 then useful=true break end
+                        end
+                    end
+                    if useful and bestStep then
+                        local t,cost=upgrade(v,bestStep)
+                        if t then
+                            setQuery(t,chain.query)
+                            z.portfolioAt=z.time+0.45
+                            z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper,query=chain.query,finalChain=wi==maxWave}
+                            if t.st.cost>=goal.cost then z.fundedChain=nil end
+                            return
+                        end
+                    end
+                end
+                z.fundedChain=nil
+            end
             local horizon=opt.capitalHorizon or 30
             local final=wi==maxWave
             local function adjusted(raw,e,kind,ignore)
@@ -422,6 +477,7 @@ function m.new(c,routes,los,spots,initSlice)
             -- Competition is local to each tower's firing windows, rather than
             -- proportional to the number of enemies on the entire map.
             local liveCache={}
+            local occupancyCache={}
             local activeEnemies={}
             for _,e in ipairs(z.enemies) do
                 if not e.dead and not e.air and not e.invulnerable and not e.noDamage and not e.untargetable and not e.stasis then activeEnemies[#activeEnemies+1]=e end
@@ -433,6 +489,14 @@ function m.new(c,routes,los,spots,initSlice)
                 if cache[key] then return cache[key] end
                 local width=2
                 local buckets,result={},{}
+                local geometry=occupancyCache[p]
+                if not geometry then geometry={} occupancyCache[p]=geometry end
+                local detectKey=tostring(detect==true)
+                local cached=geometry[detectKey]
+                if cached then
+                    buckets=cached
+                    for _,e in ipairs(activeEnemies) do result[e.id]={seconds=0,enemySeconds=0,earlySeconds=0} end
+                else
                 for i,e in ipairs(activeEnemies) do
                     result[e.id]={seconds=0,enemySeconds=0,earlySeconds=0}
                     if not e.stealth or detect then
@@ -458,6 +522,8 @@ function m.new(c,routes,los,spots,initSlice)
                         end
                     end
                     if i%16==0 then pause() end
+                end
+                geometry[detectKey]=buckets
                 end
                 allocate(buckets,result,width,mode,slice)
                 cache[key]=result
@@ -604,7 +670,8 @@ function m.new(c,routes,los,spots,initSlice)
                         newD=liveDamage(st,p,q.e,delay,mode)
                     end
                     local residual=math.max(0,q.demand-math.max(0,q.covered-oldD))
-                    current+=(math.min(residual,newD)-math.min(residual,oldD))*q.weight
+                    local focus=opt.focusType==q.e.type and (opt.focusWeight or 1) or 1
+                    current+=(math.min(residual,newD)-math.min(residual,oldD))*q.weight*focus
                     if final then early+=math.max(0,newD-oldD)*0.02/math.max(1,q.eta) end
                 end
                 for i,g in ipairs(future) do
@@ -613,8 +680,9 @@ function m.new(c,routes,los,spots,initSlice)
                     local newD,newEarly=futurePower(st,p,g,mode)
                     local available=math.clamp(1-math.max(0,delay-g.start-(g.e.first or 0))/math.max(1,(g.e.last or 0)-(g.e.first or 0)+r.length/math.max(0.1,g.e.speed or 1)),0,1)
                     local residual=math.max(0,g.demand-math.max(0,portfolio[i]-oldD))
-                    futureValue+=g.weight*(math.min(residual,newD)-math.min(residual,oldD))*available/math.max(1,g.n*g.fraction)
-                    early+=g.weight*(math.min(g.demand,newEarly)-math.min(g.demand,oldEarly))*available/math.max(1,g.n*g.fraction)
+                    local focus=opt.focusType==g.e.type and (opt.focusWeight or 1) or 1
+                    futureValue+=g.weight*focus*(math.min(residual,newD)-math.min(residual,oldD))*available/math.max(1,g.n*g.fraction)^0.65
+                    early+=g.weight*(math.min(g.demand,newEarly)-math.min(g.demand,oldEarly))*available/math.max(1,g.n*g.fraction)^0.65
                     norm+=g.weight
                 end
                 return current/math.max(1,#urgent)+futureValue/math.max(1,norm)+early/math.max(1,norm)*(opt.timeWeight or 0.4)
@@ -624,12 +692,13 @@ function m.new(c,routes,los,spots,initSlice)
             local function retainCandidate(list,item)
                 local at=#list+1
                 for i,v in ipairs(list) do if item.rank>v.rank then at=i break end end
-                if at<=6 then table.insert(list,at,item) if #list>6 then table.remove(list) end end
+                local limit=4
+                if at<=limit then table.insert(list,at,item) if #list>limit then table.remove(list) end end
             end
             local function consider(v,pos,step,goal,slotPrice)
                 local old=v and v.st
                 local price=step.cost-(old and old.cost or 0)
-                if price>z.cash and z.cash<165 then return end
+                if price>z.cash and z.cash<minPrice then return end
                 local cost=goal.cost-(old and old.cost or 0)
                 if price<=0 or cost<price then return end
                 local wait=funding(cost)
@@ -778,9 +847,16 @@ function m.new(c,routes,los,spots,initSlice)
                 if choice.v then t,cost=upgrade(choice.v,choice.step)
                 else t,cost=install(choice.pos,choice.goal.path1>=choice.goal.path2) end
             end
-            if not t then z.portfolioAt=z.time+2.25 end
+            if not t then
+                -- Wake sooner when a previously identified useful purchase becomes affordable.
+                local wait=waiting and waiting.wait or 2.5
+                z.portfolioAt=z.time+math.clamp(wait,1.35,3.0)
+            end
             if t then
                 setQuery(t,choice.query)
+                if opt.commitChain and choice.goal.cost>t.st.cost and choice.goal.cost-t.st.cost<=z.cash then
+                    z.fundedChain={pos=t.pos,path1=choice.goal.path1,path2=choice.goal.path2,query=choice.query,wave=wi}
+                end
                 z.portfolioAt=z.time+0.45
                 z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper,query=choice.query,finalChain=final}
             end
@@ -1094,10 +1170,10 @@ function m.new(c,routes,los,spots,initSlice)
                 local target
                 if replay then target=replaySkips and replaySkips[wi]
                 elseif currentLive then target=live.skipAt
-                elseif wi<maxWave and opt.fast and not cfg.Waves[wi].SkipWaveDisabled then
+                elseif wi<maxWave and not cfg.Waves[wi].SkipWaveDisabled then
                     local override=policy.skipAges and policy.skipAges[wi]
                     if override~=nil then target=override>=0 and override or nil
-                    else target=math.max(20.25,(opt.earlySkip and 20.25 or (w.last or 0)+0.5))+(opt.skipDelay or 0) end
+                    elseif opt.fast then target=math.max(20.25,(opt.earlySkip and 20.25 or (w.last or 0)+0.5))+(opt.skipDelay or 0) end
                 end
                 if wi<maxWave and target and age+1e-6>=target and age<limit-dt then
                     skipped=true
@@ -1362,7 +1438,7 @@ function m.new(c,routes,los,spots,initSlice)
         local improvedAt=0
         local bestRank=-math.huge
         local function policyKey(p)
-            local fields={"allocator","capitalHorizon","lookAhead","priceExponent","timeWeight","portfolioWait","risk","siteBreadth","fast","earlySkip","skipDelay","querySearch"}
+            local fields={"allocator","capitalHorizon","lookAhead","priceExponent","timeWeight","portfolioWait","risk","siteBreadth","fast","earlySkip","skipDelay","querySearch","commitChain","focusType","focusWeight"}
             local key={tostring(p.cancelEarly),tostring(p.grenades),tostring(p.grenadeScale)}
             for w=0,maxWave do
                 local v=settings(p,w)
@@ -1373,11 +1449,12 @@ function m.new(c,routes,los,spots,initSlice)
         end
         local round=0
         local firstWinAt,firstWinAttempt
+        local rootCursor=0
         local repairAttempts=0
         local function stopSearch()
             if not best then return false end
-            if best.routeLives>=cfg.StartingLives-0.01 and best.time<=720 then return repairAttempts>=12 or attempts-firstWinAttempt>=48 end
-            return repairAttempts>=24 and (attempts-firstWinAttempt>=100 or os.clock()-firstWinAt>=40)
+            if best.routeLives>=cfg.StartingLives-0.01 and best.time<=720 then return true end
+            return attempts-firstWinAttempt>=12 or (attempts>firstWinAttempt and os.clock()-firstWinAt>=25)
         end
         local function weakestLate(v)
             local worst,loss=math.max(1,v.to),0
@@ -1500,19 +1577,26 @@ function m.new(c,routes,los,spots,initSlice)
             retain(v,policy,problem,failedStress,checkpoints)
             return true
         end
-        for i,p in ipairs(policies) do
-            if not evaluate(p,i,#policies,"search") then return end
+        for i=1,math.min(6,#policies) do
+            rootCursor=i
+            if not evaluate(policies[i],i,#policies,"seed") then return end
             if stopSearch() then break end
         end
         while not stopSearch() do
             if s.cancel and s.cancel() then return end
             round+=1
+            -- Interleave fresh starts with repairs; do not wait for all roots.
+            if not best and rootCursor<#policies then
+                rootCursor+=1
+                if not evaluate(policies[rootCursor],rootCursor,#policies,"seed") then return end
+                if stopSearch() then break end
+            end
             local parents=table.clone(pool)
             local diverse={}
             for w=1,maxWave do if stageBest[w] then diverse[#diverse+1]=stageBest[w] end end
-            local stagnating=not best and attempts-improvedAt>=36
+            local stagnating=not best and attempts-improvedAt>=16
             assert(#parents>0,"no evaluated candidates")
-            local count=12
+            local count=6
             local tested=0
             for i=1,count do
                 if s.cancel and s.cancel() then return end
@@ -1521,7 +1605,7 @@ function m.new(c,routes,los,spots,initSlice)
                 local source=parent.stress or parent.v
                 local w=(best or i%3==0) and weakestLate(source) or i%3==1 and math.max(1,source.to) or parent.w
                 if parent.stress and i%3~=0 then w=parent.w end
-                local back=(i%4==0 and w or i%3==0 and math.min(w,4+round%5) or w>=12 and 1+(i-1)%10 or 1+(i-1)%4)
+                local back=i==1 and 1 or i==2 and 2 or i==3 and 3 or i==4 and math.min(w,4+round%4) or i==5 and 1 or math.min(w,2+round%6)
                 if parent.stress then back=math.max(back,i%6) end
                 local from=math.max(0,w-back)
                 local to=w>=12 and maxWave or math.min(maxWave,w+1+(i%3))
@@ -1531,13 +1615,18 @@ function m.new(c,routes,los,spots,initSlice)
                 patch.from=from patch.to=to
                 patch.capitalHorizon=({15,22,35,55,80,110})[(i+round)%6+1]
                 patch.lookAhead=({2,3,4,5})[(i+round)%4+1]
-                patch.priceExponent=0.55+((round+i)%6)*0.10
+                patch.priceExponent=0.25+((round+i)%7)*0.10
                 patch.timeWeight=0.10+((round*3+i)%8)*0.13
                 patch.portfolioWait=0.85+((round+i)%6)*0.20
                 patch.risk=0.65+((round+i)%5)*0.16
                 patch.siteBreadth=({3,6,9})[(i+round)%3+1]
                 patch.querySearch=(i+round)%4~=0
-                patch.fast=i%4~=0 patch.earlySkip=false
+                patch.commitChain=(i+round)%3~=0
+                if not best and source.lastLeak and i%2==1 then
+                    patch.focusType=source.lastLeak.type
+                    patch.focusWeight=1.5+(round%3)*0.5
+                else patch.focusType=nil patch.focusWeight=nil end
+                patch.fast=best~=nil and i%4~=0 patch.earlySkip=false
                 patch.skipDelay=({0,2,5,10,20,35})[(i+round)%6+1]
                 if i%3==0 then
                     p=table.clone(parent.p)
@@ -1559,12 +1648,13 @@ function m.new(c,routes,los,spots,initSlice)
                     q.repairs=nil q.skipAges={}
                     q.capitalHorizon=15+(round*13+i*11)%90
                     q.lookAhead=2+(round+i)%4
-                    q.priceExponent=0.55+((round*7+i)%9)*0.07
+                    q.priceExponent=0.25+((round*7+i)%9)*0.08
                     q.timeWeight=0.10+((round*3+i)%12)*0.10
                     q.portfolioWait=0.8+((round+i)%9)*0.15
                     q.risk=0.65+((round+i)%7)*0.14
                     q.siteBreadth=({3,6,9,12})[(round+i)%4+1]
                     q.querySearch=(round+i)%4~=0
+                    q.commitChain=(round+i)%3~=0
                     q.fast=false q.earlySkip=false
                     p=q parent=nil from=0 to=maxWave
                 elseif stagnating and i%3==2 then
@@ -1598,8 +1688,9 @@ function m.new(c,routes,los,spots,initSlice)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v30_budgeted_candidate_search"
+        plan.model="adaptive_v31_interleaved_checkpoint_search"
         plan.repairAttempts=repairAttempts
+        plan.rootAttempts=rootCursor
         plan.grenadeModel="shared_catalog_and_live"
         plan.abilityModels={GrenadeLevel1=c.ability.spec("GrenadeLevel1",abilityCatalog.GrenadeLevel1,base.range),GrenadeLevel2=c.ability.spec("GrenadeLevel2",abilityCatalog.GrenadeLevel2,base.range)}
         plan.duplicatePolicies=duplicatePolicies

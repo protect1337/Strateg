@@ -101,7 +101,7 @@ function m.new(c)
             if spent>=budget then
                 cpu+=spent peak=math.max(peak,spent) yields+=1
                 local frame=task.wait()
-                budget=frame>0.020 and 0.0006 or frame>0.010 and 0.001 or 0.0015
+                budget=frame>0.020 and 0.0006 or frame>0.012 and 0.001 or frame>0.007 and 0.0015 or 0.002
                 began=os.clock()
                 if cancel and cancel() then error("strateg_preflight_cancelled",0) end
             end
@@ -118,7 +118,7 @@ function m.new(c)
         init.progress=progress
         local first,plan=search.search(init)
         if not plan then return end
-        plan.preflightPerformance={cpuSeconds=cpu,peakSliceMs=peak*1000,yields=yields,targetSliceMs=1.5}
+        plan.preflightPerformance={cpuSeconds=cpu,peakSliceMs=peak*1000,yields=yields,targetSliceMs=2}
         if plan.ready and plan.to==#c.economy.config.Waves then rollout=plan cursor=1 end
         return plan
     end
