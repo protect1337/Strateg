@@ -96,7 +96,13 @@ function m.new(c,routes,los,spots)
         p.earlySkip=false
         policies[#policies+1]=p
     end
-    for i=1,6 do policies[#policies+1]=oldPolicies[i] end
+    local capital=table.clone(policies)
+    policies={}
+    for i=1,24 do
+        if i<=12 then policies[#policies+1]=capital[24+i] end
+        policies[#policies+1]=capital[i]
+        policies[#policies+1]=oldPolicies[i]
+    end
     local dt=0.05
     local earlyLimit=cfg.StartingLives*0.10
     local stressEarlyLimit=cfg.StartingLives*0.15
