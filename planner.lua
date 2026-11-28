@@ -502,13 +502,15 @@ function m.new(c)
             for _,st in ipairs(all) do
                 if st.cost<=s.cash and (math.max(st.path1,st.path2)==5 or st.path1==2 and st.path2==2 or st.path1==0 and st.path2==0) then goals[#goals+1]=st end
             end
+            local maxRange=base.range
+            for _,st in ipairs(goals) do maxRange=math.max(maxRange,st.range) end
             local seen={}
             local short={}
             local samples={}
             for i=1,math.min(4,#ts) do
                 local q=ts[i]
                 local points={}
-                for sec=1,math.min(75,q.eta),3 do points[#points+1]=c.physics.at(q.r,q.d+q.speed*sec) end
+                for sec=0,math.min(75,q.eta),3 do points[#points+1]=c.physics.at(q.r,q.d+q.speed*sec) end
                 samples[#samples+1]={q=q,points=points}
             end
             local function add(pos)
@@ -519,7 +521,7 @@ function m.new(c)
                 local rough=0
                 for _,g in ipairs(samples) do
                     for _,point in ipairs(g.points) do
-                        if (point-pos).Magnitude<=19 then rough+=1 end
+                        if (point-pos).Magnitude<=maxRange then rough+=1 end
                     end
                 end
                 if rough>0 then short[#short+1]={pos=pos,rank=rough} end
@@ -669,11 +671,12 @@ function m.new(c)
         local plannedSkip=rollout.skips and rollout.skips[s.wave]
         local plannedDue=plannedSkip and s.waveAge and s.waveAge+3.5*(s.speed or 1)>=plannedSkip
         local preparedDue=plannedDue and lastPreparedWave~=s.wave
-        if preparedDue and job and job.kind=="skip" and job.s.wave==s.wave and job.s.waveAge+3.5*(job.s.speed or 1)<plannedSkip then job.cancelled=true end
+        if preparedDue and job and job.s.wave==s.wave and (job.kind=="ability" or job.kind=="spend" or job.kind=="skip" and job.s.waveAge+3.5*(job.s.speed or 1)<plannedSkip) then job.cancelled=true end
         local skipKey=string.format("%d:%d:%d:%d:%d",s.wave,s.towerCount,levels,math.floor(s.lives/10),math.floor(s.cash/500))
-        local skipChanged=preparedDue or skipKey~=lastSkipKey or s.time-lastSkip>=12
-        local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>2
-            and (not plannedSkip or s.waveAge>=plannedSkip-3.5*(s.speed or 1) or not a)
+        local skipChanged=preparedDue or plannedDue and s.time-lastSkip>=1.5 or skipKey~=lastSkipKey or s.time-lastSkip>=12
+        local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>3.5*(s.speed or 1)+0.3
+            and (next(s.enemies)~=nil or s.waveAge<w.last)
+            and (not plannedSkip or plannedDue)
         if not job and not skip.allowed and not errorMessage then
             if final and not finalGoal and #ts>0 and s.cash>=base.cost and s.time-lastFinalSpend>=0.5 then
                 lastFinalSpend=s.time
@@ -707,7 +710,7 @@ function m.new(c)
                     end
                     return {action=action,baseline=b,goal=goal,sold=sold,targets=targetActions}
                 end)
-            elseif dueSkip and not queued and skipChanged and (preparedDue or s.time-lastSkip>=5) and (not a or plannedSkip and s.waveAge>=plannedSkip-3.5*(s.speed or 1)) then
+            elseif dueSkip and not queued and skipChanged and (preparedDue or s.time-lastSkip>=(plannedDue and 1.5 or 5)) and (not a or plannedDue) then
                 lastSkip=s.time lastSkipKey=skipKey
                 if plannedDue then lastPreparedWave=s.wave end
                 local snap=table.clone(s)

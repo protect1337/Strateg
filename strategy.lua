@@ -1,4 +1,4 @@
-local m={version="adaptive-v16"}
+local m={version="adaptive-v17"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -670,6 +670,7 @@ function m.new(c,routes,los,spots)
             if currentLive then limit=math.max(live.age+live.delay,firstStep*dt+dt) end
             if wi==maxWave then limit=math.max(180,w.last+r.length/0.8+30,limit) end
             local steps=math.ceil(limit/dt)
+            local clearedAt
             for k=firstStep,steps-1 do
                 pause()
                 if slice and k%32==0 and s.cancel and s.cancel() then return end
@@ -792,7 +793,14 @@ function m.new(c,routes,los,spots)
                 end
                 for j=#z.enemies,n+1,-1 do z.enemies[j]=nil end
                 if z.lives<=0 then break end
-                if wi==maxWave and event>#w.events and n==0 and #pending==0 and age>=w.last then break end
+                if event>#w.events and n==0 and #pending==0 and age>=w.last then
+                    if wi==maxWave then break end
+                    -- The observed server shortens a cleared wave to about five game seconds.
+                    clearedAt=clearedAt or age
+                    if age>=clearedAt+5-dt*0.5 then break end
+                else
+                    clearedAt=nil
+                end
                 local opt=settings(policy,wi)
                 local target
                 if replay then target=replaySkips and replaySkips[wi]
@@ -830,6 +838,7 @@ function m.new(c,routes,los,spots)
             if z.lives>0 and unknown==0 then checkpoint(wi) end
             if notify then notify(wi,z) end
             if z.lives<=0 or unknown>0 then break end
+            if live and live.acceptBoundary and live.acceptBoundary(wi,checkpoints[wi],cursor-1) then break end
         end
         local complete=#z.history==maxWave and #z.enemies==0 and #pending==0 and z.lives>0 and unknown==0
         local ledgerError=z.cash-(initialCash+z.income+z.bonuses-z.spent)
@@ -887,12 +896,21 @@ function m.new(c,routes,los,spots)
         if not target or wi>=maxWave-1 or at+0.1<target or at>=s.waveAge+s.timerRemaining-0.1 then return nil,"outside_window" end
         if at<c.forecast.wave(wi).last or (rollout.skips[wi+1] and rollout.skips[wi+1]<c.forecast.wave(wi+1).last) then return nil,"early_spawn_uncertainty" end
         if wi>1 and rollout.skips[wi-1] and rollout.skips[wi-1]<c.forecast.wave(wi-1).last then return nil,"prior_spawns" end
-        local moves={}
+        local endWave=math.min(maxWave-1,wi+3)
+        for w=wi+2,endWave do
+            if rollout.skips[w] and rollout.skips[w]<c.forecast.wave(w).last then endWave=w-1 break end
+        end
+        local moves,required={},{}
         for i=cursor or 1,#rollout.moves do
             local v=rollout.moves[i]
             if v.wave<=wi then return nil,"pending_purchase" end
-            if v.wave>wi+1 then break end
+            if v.wave>endWave then break end
             moves[#moves+1]=v
+        end
+        local n=0
+        for w=wi+1,endWave do
+            while moves[n+1] and moves[n+1].wave<=w do n+=1 end
+            required[w]=n
         end
         local skips=table.clone(rollout.skips)
         skips[wi]=at
@@ -900,24 +918,35 @@ function m.new(c,routes,los,spots)
         local started=os.clock()
         simState.cancel=function() return os.clock()-started>math.min(2.5,math.max(0.5,s.timerRemaining/math.max(1,s.speed or 1)-3.5)) end
         local worst=math.huge
+        local checkpointWave=wi+1
         for idx in pairs(routes) do
-            local ref=prepared.routes[idx] and prepared.routes[idx][wi+1]
-            local v,cps=simulate(simState,idx,rollout.policy,false,moves,nil,nil,true,skips,{wave=wi,age=s.waveAge,delay=s.timerRemaining,freezePurchases=true,endWave=wi+1,history=rollout.history})
+            local matched,why
+            local function accept(w,cp,replayed)
+                if w<=wi or replayed~=required[w] then why="purchase" return false end
+                local ref=prepared.routes[idx] and prepared.routes[idx][w]
+                local ok,reason=compareBoundary(cp,ref,w)
+                why=reason
+                if ok then matched=w return true end
+                return false
+            end
+            local v=simulate(simState,idx,rollout.policy,false,moves,nil,nil,true,skips,{wave=wi,age=s.waveAge,delay=s.timerRemaining,freezePurchases=true,endWave=endWave,history=rollout.history,acceptBoundary=accept})
             if not v then return nil,"short_budget" end
-            if v.to~=wi+1 or v.replayed~=#moves or v.unknown>0 or v.loss>0.01 or math.abs(v.ledgerError)>0.01 then return nil,"short_replay" end
-            local ok,why=compareBoundary(cps[wi+1],ref,wi+1)
-            if not ok then return nil,"boundary_"..why end
+            if not v.skips[wi] then return nil,"natural_clear_first" end
+            if v.unknown>0 or v.loss>0.01 or math.abs(v.ledgerError)>0.01 then return nil,"short_replay" end
+            if not matched then return nil,"boundary_"..tostring(why or "missing") end
+            checkpointWave=math.max(checkpointWave,matched)
             worst=math.min(worst,v.lives)
         end
         local threat=0
         for _,e in pairs(s.enemies or {}) do threat+=e.hp+(e.shield or 0) end
         local saved=math.max(0,s.timerRemaining-3.5*(s.speed or 1))
-        return {allowed=true,prepared=true,reason="prepared_checkpoint_skip",tested=1,predictedLoss=0,checkpointWave=wi+1,checkpointHP=worst,threat=threat,lives=s.lives,delay=s.timerRemaining,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1)}
+        return {allowed=true,prepared=true,reason="prepared_checkpoint_skip",tested=1,predictedLoss=0,checkpointWave=checkpointWave,checkpointHP=worst,threat=threat,lives=s.lives,delay=s.timerRemaining,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1)}
     end
     function x.compareSkips(s,rollout,cursor)
         local started=os.clock()
         local quick,why=x.preparedSkip(s,rollout,cursor)
         if quick then return quick end
+        if why=="natural_clear_first" then return {allowed=false,reason=why,preparedReason=why,tested=1} end
         if not s.waveAge or not s.timerRemaining or s.timerRemaining<1.5 or s.wave>=maxWave then return {allowed=false,reason="no_window"} end
         local wi=s.wave
         local age=s.waveAge
@@ -927,14 +956,14 @@ function m.new(c,routes,los,spots)
         local simState=table.clone(s)
         simState.cancel=function() return os.clock()-started>limit end
         local candidates={}
-        local function evaluate(skipAt,cancelUnspawned,freezePurchases)
+        local function evaluate(skipAt,cancelUnspawned,freezePurchases,replay,replaySkips)
             local worst,finish,minimumCash,loss=math.huge,0,math.huge,0
             local chosen
             for idx in pairs(routes) do
-                local v=simulate(simState,idx,policy,false,nil,nil,nil,false,nil,{wave=wi,age=age,delay=delay,skipAt=skipAt,cancelUnspawned=cancelUnspawned,freezePurchases=freezePurchases,history=rollout.history})
+                local v=simulate(simState,idx,policy,false,replay,nil,nil,false,replaySkips,{wave=wi,age=age,delay=delay,skipAt=skipAt,cancelUnspawned=cancelUnspawned,freezePurchases=freezePurchases,history=rollout.history})
                 if not v then return nil end
                 if not chosen then chosen=v end
-                if not v.complete or math.abs(v.ledgerError)>0.01 then
+                if not v.complete or replay and v.replayed~=#replay or math.abs(v.ledgerError)>0.01 or skipAt and not v.skips[wi] then
                     return {complete=false,lives=v.lives,time=v.time,loss=v.loss,at=skipAt,remaining=v.remaining}
                 end
                 worst=math.min(worst,v.lives)
@@ -944,9 +973,38 @@ function m.new(c,routes,los,spots)
             end
             return {complete=true,lives=worst,time=finish,loss=loss,cash=minimumCash,at=skipAt,score=objective({time=finish,lives=worst},s.lives),plan=chosen}
         end
+        local first=age+3.5*(s.speed or 1)
+        if first>=age+delay-0.1 then return {allowed=false,reason="no_window",preparedReason=why} end
+        local planned=rollout.skips and rollout.skips[wi]
+        local canReplay=planned and first+0.1>=planned and first>=c.forecast.wave(wi).last
+        if canReplay then
+            for w=wi+1,maxWave-1 do
+                if rollout.skips[w] and rollout.skips[w]<c.forecast.wave(w).last then canReplay=false break end
+            end
+        end
+        if canReplay then
+            local moves={}
+            for i=cursor or 1,#rollout.moves do moves[#moves+1]=rollout.moves[i] end
+            local skips=table.clone(rollout.skips)
+            skips[wi]=first
+            local fast=evaluate(first,false,true,moves,skips)
+            if fast and fast.complete then
+                skips[wi]=nil
+                local natural=evaluate(nil,false,false,moves,skips)
+                if natural and natural.complete then
+                    local saved=natural.time-fast.time
+                    if saved>0.8 and fast.lives>=natural.lives-0.01 and fast.score+0.8<natural.score then
+                        local threat=0
+                        for _,e in pairs(s.enemies or {}) do threat+=e.hp+(e.shield or 0) end
+                        return {allowed=true,prepared=true,reason="verified_replay_skip",tested=2,predictedLoss=fast.loss,waitLoss=natural.loss,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1),threat=threat,lives=s.lives,delay=delay,preparedReason=why}
+                    end
+                    return {allowed=false,reason="replay_wait_better",tested=2,preparedReason=why,predictedLoss=fast.loss,waitLoss=natural.loss,saved=saved}
+                end
+            end
+            if os.clock()-started>=limit then return {allowed=false,reason="replay_budget",preparedReason=why,tested=fast and 1 or 0} end
+        end
         local wait=evaluate(nil,false)
         if not wait then return {allowed=false,reason="branch_budget",preparedReason=why,tested=0} end
-        local first=age+3.5*(s.speed or 1)
         local now=evaluate(first,false,true)
         if not now then return {allowed=false,reason="branch_budget",preparedReason=why,tested=1} end
         local w=c.forecast.wave(wi)
@@ -1177,7 +1235,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v16_capital_final_investment"
+        plan.model="adaptive_v17_natural_clear_replay_skip"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts

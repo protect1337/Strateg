@@ -25,6 +25,7 @@ function m.new(common, reader, ctx, log)
     end)
     local canVote = false
     local pending
+    local pendingSkip
     local nextAt = 0
     local votedWave
     local confirmedSkipWave
@@ -84,7 +85,18 @@ function m.new(common, reader, ctx, log)
         end
         if not allowed(s) then
             pending = nil
+            pendingSkip = nil
             return false
+        end
+        if pendingSkip then
+            if s.wave~=pendingSkip.wave then
+                confirmedSkipWave=pendingSkip.wave
+                report(pendingSkip.action,"observed","wave_transition_after_vote")
+                pendingSkip=nil
+            elseif os.clock()>=pendingSkip.deadline then
+                report(pendingSkip.action,"failed","skip_transition_timeout")
+                pendingSkip=nil
+            end
         end
         if pending then
             local a = pending.action
@@ -104,12 +116,9 @@ function m.new(common, reader, ctx, log)
             elseif a.kind == "ability" then
                 local ab = t and t.abilities[a.name]
                 confirmed = ab and (ab.cooldown or 0) > pending.cooldown
-            elseif a.kind == "skip" then
-                confirmed = s.wave ~= pending.wave
             end
             if confirmed then
                 report(a, "confirmed")
-                if a.kind=="skip" then confirmedSkipWave=pending.wave end
                 pending = nil
             elseif os.clock() >= pending.deadline then
                 report(a, "failed", "confirmation_timeout")
@@ -122,7 +131,7 @@ function m.new(common, reader, ctx, log)
     function x.skipConfirmed(wi) return confirmedSkipWave==wi end
 
     function x.canSkip(s)
-        return canVote and votedWave ~= s.wave
+        return canVote and not pendingSkip and votedWave ~= s.wave
     end
 
     function x.target(a,s)
@@ -145,7 +154,7 @@ function m.new(common, reader, ctx, log)
         local s=snapshot
         if not s or a.kind=="skip" or os.clock()-s.time>0.15 then s=reader.read() end
         if not allowed(s) or not x.ready(s) then return false end
-        if a.kind=="sell" and s.wave<12 or a.kind=="skip" and s.wave<1 then return false end
+        if a.kind=="sell" and (s.wave<12 or pendingSkip) or a.kind=="skip" and s.wave<1 then return false end
         local player = pc.GetLocalPlayerWrapper()
         if not player or not player.Stats then return false end
         local stats = player.Stats
@@ -200,7 +209,7 @@ function m.new(common, reader, ctx, log)
             return false
         end
         p.deadline = os.clock() + (a.kind=="upgrade" and 1.5 or 5)
-        pending = p
+        if a.kind=="skip" then pendingSkip=p else pending=p end
         report(a, "sent")
         return true
     end
