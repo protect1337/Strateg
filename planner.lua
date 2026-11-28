@@ -92,16 +92,16 @@ function m.new(c)
     end
 
     function x.preflight(s,cancel,progress)
-        -- Preflight also runs on the client scheduler, not a background CPU.
+        -- Turbo is deliberately confined to preflight. Yield periodically
+        -- for networking, cancellation and rendering, not to target high FPS.
         local began=os.clock()
-        local budget=0.0015
+        local budget=0.050
         local cpu,peak,yields=0,0,0
         local function slice()
             local spent=os.clock()-began
             if spent>=budget then
                 cpu+=spent peak=math.max(peak,spent) yields+=1
-                local frame=task.wait()
-                budget=frame>0.020 and 0.0006 or frame>0.012 and 0.001 or frame>0.007 and 0.0015 or 0.002
+                task.wait()
                 began=os.clock()
                 if cancel and cancel() then error("strateg_preflight_cancelled",0) end
             end
@@ -109,6 +109,7 @@ function m.new(c)
         if not prepare(s,slice) then return end
         local init=table.clone(s)
         init.runtimeSlice=slice
+        init.firstVerified=true
         init.wave=0
         init.cash=c.economy.config.StartingCash
         init.lives=c.economy.config.StartingLives
@@ -129,7 +130,8 @@ function m.new(c)
         end
         local first,plan=search.search(init)
         if not plan then return end
-        plan.preflightPerformance={cpuSeconds=cpu,peakSliceMs=peak*1000,yields=yields,targetSliceMs=2}
+        local tailCPU=math.max(0,os.clock()-began)
+        plan.preflightPerformance={mode="turbo",cpuSeconds=cpu+tailCPU,peakSliceMs=math.max(peak,tailCPU)*1000,yields=yields,targetSliceMs=50}
         if plan.ready and plan.to==#c.economy.config.Waves then rollout=plan cursor=1 end
         return plan
     end

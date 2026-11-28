@@ -1,4 +1,4 @@
-local m={version="adaptive-v31"}
+local m={version="adaptive-v32"}
 
 function m.new(c,routes,los,spots,initSlice)
     local x={}
@@ -1427,7 +1427,7 @@ function m.new(c,routes,los,spots,initSlice)
         local idx,short
         for k,r in pairs(routes) do if not short or r.length<short then idx,short=k,r.length end end
         if not idx then return end
-        local best,failed
+        local best,failed,bestPrepared
         local pool={}
         local signatures={}
         local policySeen={}
@@ -1453,6 +1453,7 @@ function m.new(c,routes,los,spots,initSlice)
         local repairAttempts=0
         local function stopSearch()
             if not best then return false end
+            if s.firstVerified then return true end
             if best.routeLives>=cfg.StartingLives-0.01 and best.time<=720 then return true end
             return attempts-firstWinAttempt>=12 or (attempts>firstWinAttempt and os.clock()-firstWinAt>=25)
         end
@@ -1520,8 +1521,9 @@ function m.new(c,routes,los,spots,initSlice)
                 -- is handled by explicit estimates, not by deleting abilities.
                 checkPolicy.grenades=true
                 local checks={}
+                local verifiedRoutes={}
                 for k in pairs(routes) do
-                    local test=simulate(s,k,checkPolicy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end,nil,false,v.skips)
+                    local test,cps=simulate(s,k,checkPolicy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end,nil,true,v.skips)
                     if not test then return false end
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
@@ -1544,6 +1546,7 @@ function m.new(c,routes,los,spots,initSlice)
                             if not alt.complete or alt.replayed~=#v.moves or math.abs(alt.ledgerError)>0.01 then why="early_skip_uncertain" test=alt end
                         end
                     end
+                    if why=="passed" then verifiedRoutes[k]=cps end
                     if why~="passed" then
                         ok=false
                         failedStress=test
@@ -1571,13 +1574,16 @@ function m.new(c,routes,los,spots,initSlice)
                     if not firstWinAt then firstWinAt=os.clock() firstWinAttempt=attempts end
                     local rank=robustTime+(cfg.StartingLives-worst)*2.5+robustEarly*2+#v.moves*0.001
                     candidate.selectionScore=rank
-                    if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then best=candidate end
+                    if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then
+                        best=candidate
+                        bestPrepared={moves=candidate.moves,routes=verifiedRoutes}
+                    end
                 end
             end
             retain(v,policy,problem,failedStress,checkpoints)
             return true
         end
-        for i=1,math.min(6,#policies) do
+        for i=1,math.min(s.firstVerified and 3 or 6,#policies) do
             rootCursor=i
             if not evaluate(policies[i],i,#policies,"seed") then return end
             if stopSearch() then break end
@@ -1675,20 +1681,19 @@ function m.new(c,routes,los,spots,initSlice)
                 local phase=string.format("repair %d | weak wave %d | revise %d-%d%s",round,w,from,to,stagnating and " | diversify" or "")
                 if not evaluate(p,i,count,phase,parent) then return end
                 if stopSearch() then break end
-                task.wait()
+                if s.runtimeSlice then s.runtimeSlice() else task.wait() end
             end
             assert(tested>0,"repair batch empty")
-            task.wait(0.1)
+            if s.runtimeSlice then s.runtimeSlice() else task.wait(0.1) end
         end
         local plan=assert(best,"search ended without a validated plan")
         plan.ready=true
-        prepared={moves=plan.moves,routes={}}
-        for idx in pairs(routes) do
-            local v,cps=simulate(s,idx,plan.policy,false,plan.moves,nil,nil,true,plan.skips)
-            if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
-            prepared.routes[idx]=cps
-        end
-        plan.model="adaptive_v31_interleaved_checkpoint_search"
+        -- Reuse the checkpoints from the exact successful route replays.
+        -- Do not simulate the same winning moves a third time.
+        prepared=bestPrepared
+        plan.model="adaptive_v32_turbo_first_verified"
+        plan.searchMode=s.firstVerified and "first_verified" or "optimize"
+        plan.reusedVerifiedCheckpoints=prepared~=nil
         plan.repairAttempts=repairAttempts
         plan.rootAttempts=rootCursor
         plan.grenadeModel="shared_catalog_and_live"
