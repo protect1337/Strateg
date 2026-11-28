@@ -26,6 +26,8 @@ function m.new(common, reader, ctx, log)
     local canVote = false
     local pending
     local pendingSkip
+    local pendingAbilities={}
+    local nextAbilityAt=0
     local nextAt = 0
     local votedWave
     local confirmedSkipWave
@@ -62,7 +64,7 @@ function m.new(common, reader, ctx, log)
     end
 
     function x.available(a)
-        return not blocked[key(a)] or os.clock() >= blocked[key(a)]
+        return (a.kind~="ability" or not pendingAbilities[a.id]) and (not blocked[key(a)] or os.clock() >= blocked[key(a)])
     end
 
     function x.ready(s)
@@ -86,6 +88,7 @@ function m.new(common, reader, ctx, log)
         if not allowed(s) then
             pending = nil
             pendingSkip = nil
+            table.clear(pendingAbilities)
             return false
         end
         if pendingSkip then
@@ -96,6 +99,17 @@ function m.new(common, reader, ctx, log)
             elseif os.clock()>=pendingSkip.deadline then
                 report(pendingSkip.action,"failed","skip_transition_timeout")
                 pendingSkip=nil
+            end
+        end
+        for id,p in pairs(pendingAbilities) do
+            local t=s.towers[id]
+            local ab=t and t.abilities[p.action.name]
+            if ab and (ab.cooldown or 0)>p.cooldown+0.2 then
+                report(p.action,"observed","client_cooldown_changed")
+                pendingAbilities[id]=nil
+            elseif not t or os.clock()>=p.deadline then
+                report(p.action,"failed",not t and "ability_tower_missing" or "ability_confirmation_timeout")
+                pendingAbilities[id]=nil
             end
         end
         if pending then
@@ -130,13 +144,14 @@ function m.new(common, reader, ctx, log)
 
     function x.skipConfirmed(wi) return confirmedSkipWave==wi end
     function x.queryBusy(id) return queryPending[id]~=nil end
+    function x.abilityBusy(id) return pendingAbilities[id]~=nil or pending and pending.action.id==id end
 
     function x.canSkip(s)
         return canVote and not pendingSkip and votedWave ~= s.wave
     end
 
     function x.target(a,s)
-        if not allowed(s) or not a or (s.wave<12 and a.reason~="grenade_retarget" and a.reason~="grenade_restore") or queryPending[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<(a.reason=="grenade_restore" and 0.3 or 2) then return false end
+        if not allowed(s) or not a or (s.wave<12 and a.reason~="grenade_retarget" and a.reason~="grenade_restore") or queryPending[a.id] or pendingAbilities[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<(a.reason=="grenade_restore" and 0.3 or 2) then return false end
         local t=tower(a.id)
         if not t or t.CustomQueryOptions or type(a.query)~="number" or a.query%1~=0 or a.query<0 or a.query>3 or t.QueryTypeIndex==a.query then return false end
         local ok=pcall(function()
@@ -154,7 +169,11 @@ function m.new(common, reader, ctx, log)
         if not a or a.kind == "hold" or not x.available(a) then return false end
         local s=snapshot
         if not s or a.kind=="skip" or os.clock()-s.time>0.15 then s=reader.read() end
-        if not allowed(s) or not x.ready(s) then return false end
+        if not allowed(s) then return false end
+        local ready=x.ready(s)
+        if a.kind=="ability" then
+            if x.abilityBusy(a.id) or os.clock()<nextAbilityAt then return false end
+        elseif not ready or a.id and pendingAbilities[a.id] then return false end
         if a.kind=="sell" and (s.wave<12 or pendingSkip) or a.kind=="skip" and s.wave<1 then return false end
         local player = pc.GetLocalPlayerWrapper()
         if not player or not player.Stats then return false end
@@ -217,13 +236,13 @@ function m.new(common, reader, ctx, log)
             end
             return false, "unknown_action"
         end)
-        nextAt = os.clock() + 0.06
+        if a.kind=="ability" then nextAbilityAt=os.clock()+0.06 else nextAt=os.clock()+0.06 end
         if not ok or not accepted then
             report(a, "failed", tostring(ok and reason or accepted))
             return false
         end
         p.deadline = os.clock() + (a.kind=="ability" and 1.0 or a.kind=="upgrade" and 1.5 or 5)
-        if a.kind=="skip" then pendingSkip=p else pending=p end
+        if a.kind=="skip" then pendingSkip=p elseif a.kind=="ability" then pendingAbilities[a.id]=p else pending=p end
         report(a, "sent")
         return true
     end

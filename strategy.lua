@@ -1,4 +1,4 @@
-local m={version="adaptive-v24"}
+local m={version="adaptive-v25"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -1299,8 +1299,11 @@ function m.new(c,routes,los,spots)
         end
         local round=0
         local firstWinAt,firstWinAttempt
+        local repairAttempts=0
         local function stopSearch()
-            return best and (attempts-firstWinAttempt>=64 or os.clock()-firstWinAt>=18)
+            if not best then return false end
+            if best.routeLives>=cfg.StartingLives-0.01 and best.time<=720 then return repairAttempts>=12 or attempts-firstWinAttempt>=48 end
+            return repairAttempts>=24 and (attempts-firstWinAttempt>=100 or os.clock()-firstWinAt>=40)
         end
         local function weakestLate(v)
             local worst,loss=math.max(1,v.to),0
@@ -1320,7 +1323,7 @@ function m.new(c,routes,los,spots)
         end
         local function score(v)
             local eligible=v.complete and v.lives>0
-            return v.to*1000000+(eligible and 100000000 or 0)-(eligible and objective(v,cfg.StartingLives) or math.min(v.loss, cfg.StartingLives+math.max(0,v.loss-cfg.StartingLives)*0.12)*120+(v.remainingHP or 0)*2+(v.earlyLoss or 0)*180)
+            return v.to*1000000+(eligible and 100000000 or 0)-(eligible and (v.time+(cfg.StartingLives-v.lives)*2.5+(v.earlyLoss or 0)*2) or math.min(v.loss, cfg.StartingLives+math.max(0,v.loss-cfg.StartingLives)*0.12)*120+(v.remainingHP or 0)*2+(v.earlyLoss or 0)*180)
         end
         local function retain(v,p,w,stressTest,checkpoints)
             local key={}
@@ -1347,6 +1350,7 @@ function m.new(c,routes,los,spots)
             if policySeen[key] then duplicatePolicies+=1 return true end
             policySeen[key]=true
             attempts+=1
+            if round>0 then repairAttempts+=1 end
             local v,checkpoints=simulate(s,idx,policy,false,nil,function(w,z) report(i,n,w,z,phase) end,parent,true)
             if not v then return false end
             if not failed or score(v)>score(failed) then failed=v end
@@ -1480,7 +1484,9 @@ function m.new(c,routes,los,spots)
                     local wv=c.forecast.wave(wi)
                     local old=source.skips[wi] or math.max(15,wv.last+0.5)
                     local delta=best and ({-8,-4,-2,2,4,8})[(round+i)%6+1] or ({4,8,15,25})[(round+i)%4+1]
-                    p.skipAges[wi]=i%6==0 and -1 or math.max(20.25,old+delta)
+                    if best and not source.skips[wi] then
+                        p.skipAges[wi]=math.max(20.25,wv.last+({0.5,3,7,12})[(round+i)%4+1])
+                    else p.skipAges[wi]=i%6==0 and -1 or math.max(20.25,old+delta) end
                 else
                     p.repairs[#p.repairs+1]=patch
                 end
@@ -1533,7 +1539,8 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v24_shared_ability_model"
+        plan.model="adaptive_v25_ability_dispatch_search"
+        plan.repairAttempts=repairAttempts
         plan.grenadeModel="shared_catalog_and_live"
         plan.abilityModels={GrenadeLevel1=c.ability.spec("GrenadeLevel1",abilityCatalog.GrenadeLevel1,base.range),GrenadeLevel2=c.ability.spec("GrenadeLevel2",abilityCatalog.GrenadeLevel2,base.range)}
         plan.duplicatePolicies=duplicatePolicies

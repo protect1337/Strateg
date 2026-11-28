@@ -80,7 +80,7 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
     end
     for id,t in pairs(s.towers) do
         if t.owned and t.type=="Ranger" then
-            if next(t.abilities or {}) then ids[#ids+1]=id end
+            if t.abilities and (t.abilities.GrenadeLevel1 or t.abilities.GrenadeLevel2) then ids[#ids+1]=id end
             if not t.stunned and not t.attackDisabled and t.target and enemies[t.target] then
                 local list=assignments[t.target] or {}
                 list[#list+1]=t
