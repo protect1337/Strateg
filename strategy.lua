@@ -327,7 +327,6 @@ function m.new(c,routes,los,spots)
         end
         local function purchase(wi,age)
             pause()
-            if z.cash<165 then return end
             if replay then
                 local a=replay[cursor]
                 if not a or a.wave>wi or a.wave==wi and (a.age or 0)>age+1e-6 then return end
@@ -337,11 +336,14 @@ function m.new(c,routes,los,spots)
                 local st=stats[a.path1*10+a.path2]
                 if not st then return end
                 local success
-                if t then success=upgrade(t,st) elseif st.cost==base.cost then success=install(p,a.upper) end
+                if a.kind=="target" then
+                    if t and t.st.path1==a.path1 and t.st.path2==a.path2 then success=t end
+                elseif t then success=upgrade(t,st) elseif st.cost==base.cost then success=install(p,a.upper) end
                 if success then setQuery(success,a.query) cursor+=1 blockedMove=nil
                 else blockedMove={wave=wi,age=age,index=cursor,required=t and st.cost-t.st.cost or st.cost,cash=z.cash,pos=a.pos,path1=a.path1,path2=a.path2} end
                 return
             end
+            if z.cash<base.cost and #z.towers==0 then return end
             local opt=settings(policy,wi)
             local elapsed=math.max(dt,z.time-(z.cashSampleAt or z.time-dt))
             local earned=math.max(0,z.income-(z.cashSampleIncome or z.income))
@@ -579,6 +581,7 @@ function m.new(c,routes,los,spots)
             local function consider(v,pos,step,goal,slotPrice)
                 local old=v and v.st
                 local price=step.cost-(old and old.cost or 0)
+                if price>z.cash and z.cash<base.cost then return end
                 local cost=goal.cost-(old and old.cost or 0)
                 if price<=0 or cost<price then return end
                 local wait=funding(cost)
@@ -601,7 +604,7 @@ function m.new(c,routes,los,spots)
                 if final then rank=benefit*discount/(1+cost/math.max(1,z.cash)*0.15)
                 else rank=benefit*discount/math.max(1,cost+(slotPrice or 0))^(opt.priceExponent or 0.85) end
                 if rank<=0 then return end
-                local item={v=v,pos=pos,step=step,goal=goal,rank=rank,wait=wait,query=mode}
+                local item={v=v,pos=pos,step=step,goal=goal,rank=rank,wait=wait,query=mode,benefit=benefit}
                 if cost<=z.cash and price<=z.cash then
                     if not chosen or rank>chosen.rank then chosen=item end
                 elseif not waiting or rank>waiting.rank then waiting=item end
@@ -670,6 +673,32 @@ function m.new(c,routes,los,spots)
             local choice=chosen
             local threatened=danger>(opt.risk or 1)
             if waiting and chosen and not final and not threatened and waiting.rank>chosen.rank*(opt.portfolioWait or 1.3) and waiting.wait<horizon*0.45 then choice=nil end
+            -- Target-only changes compete independently of money.  Require a
+            -- meaningful gain and time to observe the new mode before changing again.
+            if opt.querySearch~=false and wi>0 and #activeEnemies>0 and z.time>=(z.nextQuerySearch or 0) then
+                z.nextQuerySearch=z.time+3
+                local bestQuery
+                for _,v in ipairs(z.towers) do
+                    pause()
+                    local oldMode=v.pendingQuery or v.query or 0
+                    if not v.pendingQuery then
+                        for q=0,3 do
+                            if q~=oldMode then
+                                local benefit=gain(v.st,v.profile,v.st,v.profile,0.45,oldMode,q)
+                                if benefit>math.max(8,v.st.damage*0.15) and (not bestQuery or benefit>bestQuery.benefit) then
+                                    bestQuery={tower=v,mode=q,benefit=benefit}
+                                end
+                            end
+                        end
+                    end
+                end
+                if bestQuery and (not choice or bestQuery.benefit>choice.benefit*0.8) then
+                    local v=bestQuery.tower
+                    setQuery(v,bestQuery.mode)
+                    z.moves[#z.moves+1]={kind="target",wave=wi,age=age,pos=c.physics.pack(v.pos),path1=v.st.path1,path2=v.st.path2,price=0,upper=v.upper,query=bestQuery.mode}
+                    return
+                end
+            end
             local t,cost
             if choice then
                 if choice.v then t,cost=upgrade(choice.v,choice.step)
@@ -1296,7 +1325,7 @@ function m.new(c,routes,los,spots)
         end
         local function retain(v,p,w,stressTest,checkpoints)
             local key={}
-            for _,a in ipairs(v.moves) do key[#key+1]=string.format("%d:%.2f:%.2f:%.2f:%.2f:%d:%d:%d",a.wave,a.age or 0,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2,a.query or 0) end
+            for _,a in ipairs(v.moves) do key[#key+1]=string.format("%s:%d:%.2f:%.2f:%.2f:%.2f:%d:%d:%d",a.kind or "purchase",a.wave,a.age or 0,a.pos.x,a.pos.y,a.pos.z,a.path1,a.path2,a.query or 0) end
             for wi=1,maxWave-1 do key[#key+1]=string.format("s%d:%.2f",wi,v.skips[wi] or -1) end
             key=table.concat(key,";")
             local rank=score(v)

@@ -54,6 +54,7 @@ function m.new(c)
     end
     local queued
     local cursor=1
+    local desiredQueries={}
     local soldWave
     local skipContinuation
     local lastSale=-math.huge
@@ -79,6 +80,7 @@ function m.new(c)
             c.tactics.reset(key)
             rollout=nil
             cursor=1
+            table.clear(desiredQueries)
             soldWave=nil
             skipContinuation=nil
             queued=nil
@@ -427,12 +429,13 @@ function m.new(c)
                 if v.owned and v.type=="Ranger" and (c.physics.vec(v.pos)-c.physics.vec(goal.pos)).Magnitude<2 then t=v break end
             end
         end
+        if goal.kind=="target" then return nil,true,t end
         if goal.live then
             local pos=t and c.physics.vec(t.pos) or goal.pos and c.physics.vec(goal.pos)
             if not pos or value(st,pos,ts or {})<=0 then return nil,true end
         end
         if t then
-            if t.path1>=st.path1 and t.path2>=st.path2 then return nil,true end
+            if t.path1>=st.path1 and t.path2>=st.path2 then return nil,true,t end
             if st.path1<t.path1 or st.path2<t.path2 then return nil,true end
             local a=nextStep(t,st,s.cash)
             if a and valid(a,s) then return pack(a) end
@@ -616,9 +619,12 @@ function m.new(c)
         local planned,plannedAction=false,nil
         while cursor<=#rollout.moves do
             local goal=rollout.moves[cursor]
-            if final and not goal.finalChain then goal=table.clone(goal) goal.live=true end
-            local v,done=follow(s,goal,ts)
-            if done then cursor+=1
+            if goal.kind=="target" and (goal.wave>s.wave or goal.wave==s.wave and (not s.waveAge or s.waveAge+0.15<(goal.age or 0))) then planned=true break end
+            if final and not goal.finalChain and goal.kind~="target" then goal=table.clone(goal) goal.live=true end
+            local v,done,t=follow(s,goal,ts)
+            if done then
+                if t and goal.query~=nil then desiredQueries[t.id]=goal.query end
+                cursor+=1
             else
                 planned=true
                 if goal.wave<=s.wave and v then plannedAction=v v.reason="verified_plan" end
@@ -642,7 +648,18 @@ function m.new(c)
         if baselineWave~=s.wave then baseline=nil cachedBaseline=nil end
         local a=queuedAction or investmentAction or plannedAction
         local skip={allowed=false,reason=job and "analysis_running" or "priority"}
-        local targets
+        local targets={}
+        local queryIds={}
+        for id,mode in pairs(desiredQueries) do
+            local t=s.towers[id]
+            if not t then desiredQueries[id]=nil
+            elseif t.query~=mode and not c.executor.queryBusy(id) and not c.executor.abilityBusy(id) then queryIds[#queryIds+1]=id end
+        end
+        table.sort(queryIds)
+        for i=1,math.min(3,#queryIds) do
+            local id=queryIds[i]
+            targets[#targets+1]={kind="target",id=id,query=desiredQueries[id],reason="verified_query"}
+        end
         local errorMessage
         local result=finished
         finished=nil
@@ -658,7 +675,10 @@ function m.new(c)
                     if v.action and valid(v.action,s) then
                         a=v.action queued=v.goal
                         if v.sold then soldWave=s.wave end
-                    elseif not a and v.targets then targets=v.targets end
+                    elseif not a and v.targets then
+                        for _,q in ipairs(v.targets) do desiredQueries[q.id]=q.query end
+                        targets=v.targets
+                    end
                 elseif result.kind=="skip" then
                     skip=v
                     if skip.allowed and (skip.plan or skip.prepared) and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>3.5*(s.speed or 1)+0.5 then

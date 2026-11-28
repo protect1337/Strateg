@@ -151,7 +151,7 @@ function m.new(common, reader, ctx, log)
     end
 
     function x.target(a,s)
-        if not allowed(s) or not a or (s.wave<12 and a.reason~="grenade_retarget" and a.reason~="grenade_restore") or queryPending[a.id] or pendingAbilities[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<(a.reason=="grenade_restore" and 0.3 or 2) then return false end
+        if not allowed(s) or not a or (s.wave<12 and a.reason~="grenade_retarget" and a.reason~="grenade_restore" and a.reason~="verified_query") or queryPending[a.id] or pendingAbilities[a.id] or pending and pending.action.id==a.id or os.clock()-(queryTime[a.id] or -math.huge)<((a.reason=="grenade_restore" or a.reason=="verified_query") and 0.3 or 2) then return false end
         local t=tower(a.id)
         if not t or t.CustomQueryOptions or type(a.query)~="number" or a.query%1~=0 or a.query<0 or a.query>3 or t.QueryTypeIndex==a.query then return false end
         local ok=pcall(function()
