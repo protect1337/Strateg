@@ -3,6 +3,9 @@ local m={}
 function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
     local step=(ranger.config.Radius or 1.5)*2+0.05
     local dz=step*math.sqrt(3)/2
+    local baseRange=ranger.stats(0,0).range
+    local maxRange=baseRange
+    for _,st in ipairs(ranger.all()) do maxRange=math.max(maxRange,st.range) end
     local seen={}
     local out={}
     local samples={}
@@ -37,12 +40,15 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
                             if placement.Check(pos,ranger.config,team) then
                                 local first=math.huge
                                 local early,total,up=0,0,0
-                                for _,points in pairs(samples) do
+                                local sections={}
+                                for idx,points in pairs(samples) do
                                     for _,q in ipairs(points) do
                                         local dist=(q.pos-pos).Magnitude
-                                        if dist<=16 and los(pos,q.pos) then
-                                            up+=2
-                                            if dist<=9 then
+                                        if dist<=math.max(16,maxRange) and los(pos,q.pos) then
+                                            if dist<=16 then up+=2 end
+                                            local section=tostring(idx)..":"..math.min(11,math.floor(q.d/math.max(1,routes[idx].length)*12))
+                                            sections[section]=(sections[section] or 0)+2*(dist<=baseRange and 1 or 0.35)
+                                            if dist<=baseRange then
                                                 total+=2
                                                 early+=2/(1+q.d/24)^2
                                                 first=math.min(first,q.d)
@@ -50,7 +56,7 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
                                         end
                                     end
                                 end
-                                if total>0 then out[#out+1]={pos=pos,coverage=early+up*0.025,total=total,first=first,grid=k} end
+                                if total>0 then out[#out+1]={pos=pos,coverage=early+up*0.025,total=total,first=first,grid=k,sections=sections} end
                             end
                         end
                     end
@@ -68,6 +74,33 @@ function m.candidates(routes,physics,placement,ranger,team,snapshot,los)
             result[#result+1]=v
             used[v.grid]=true
             if #result>=360 then break end
+        end
+    end
+    -- Preserve the original early/global shortlist and add a local shortlist
+    -- for each segment, so the end of the route cannot disappear from the grid.
+    local buckets={}
+    for _,v in ipairs(out) do
+        for key,score in pairs(v.sections) do
+            local bucket=buckets[key] or {}
+            bucket[#bucket+1]={v=v,score=score}
+            buckets[key]=bucket
+        end
+    end
+    local keys={}
+    for key in pairs(buckets) do keys[#keys+1]=key end
+    table.sort(keys)
+    for _,key in ipairs(keys) do
+        local bucket=buckets[key]
+        table.sort(bucket,function(a,b)
+            if a.score~=b.score then return a.score>b.score end
+            return a.v.grid<b.v.grid
+        end)
+        local added=0
+        for _,q in ipairs(bucket) do
+            if not used[q.v.grid] then
+                result[#result+1]=q.v used[q.v.grid]=true added+=1
+                if added>=18 then break end
+            end
         end
     end
     table.sort(result,function(a,b) return a.coverage>b.coverage end)

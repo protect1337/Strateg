@@ -1,4 +1,4 @@
-local m={version="adaptive-v21"}
+local m={version="adaptive-v22"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -148,7 +148,7 @@ function m.new(c,routes,los,spots)
         local slice=s.runtimeSlice
         local function pause() if slice then slice() end end
         local z={cash=cfg.StartingCash,lives=cfg.StartingLives,towers={},enemies={},moves={},history={},skips={},time=0,loss=0,earlyLoss=0,spent=0,income=0,bonuses=0}
-        local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 40
+        local cap=(s.towerLimit and s.towerLimit>0) and s.towerLimit or 140
         local cursor=1
         local blockedMove
         local serial=0
@@ -401,6 +401,74 @@ function m.new(c,routes,los,spots)
                 end
                 return value/cached.norm+cached.value
             end
+            -- At the end of the match a saved dollar has no value. Compare
+            -- funded chains by damage deliverable AFTER their construction time.
+            -- Preserve the same individual purchases in the verified replay.
+            if wi==maxWave and age>=c.forecast.wave(wi).last+1 and #urgent>0 then
+                local bestChain
+                local function reachable(st,p,delay)
+                    local value=0
+                    for _,q in ipairs(urgent) do
+                        local e=q.e
+                        local speed=math.max(0.1,e.speed or 1)
+                        if (e.sludgeUntil or 0)>z.time then speed*=1.8 end
+                        local d=math.min(last,math.floor(e.dist+speed*delay+0.5))
+                        if d<last then
+                            local damage=impact(st,p,e,d)
+                            local demand=e.hp+(e.shield or 0)
+                            value+=math.min(demand,damage)*q.weight*(e.type=="Plague Doctor" and 1.4 or 1)
+                        end
+                    end
+                    return value
+                end
+                local function consider(v,pos,goal,step,upper)
+                    local old=v and v.st
+                    local price=goal.cost-(old and old.cost or 0)
+                    if price<=0 or price>z.cash then return end
+                    local count=goal.path1+goal.path2-(old and old.path1+old.path2 or 0)+(v and 0 or 1)
+                    local delay=0.45*count
+                    local gain=reachable(goal,profile(pos,goal.range,idx,slice),delay)-(old and reachable(old,v.profile,delay) or 0)
+                    if gain<=0 then return end
+                    local rank=gain/math.max(1,price)^0.25
+                    if not bestChain or rank>bestChain.rank then bestChain={v=v,pos=pos,goal=goal,step=step,upper=upper,rank=rank} end
+                end
+                for _,v in ipairs(z.towers) do
+                    pause()
+                    local a,b=v.st.path1,v.st.path2
+                    for _,goal in pairs(stats) do
+                        if goal.path1>=a and goal.path2>=b and goal.cost>v.st.cost and goal.cost-v.st.cost<=z.cash then
+                            local step=goal.path1>a and stats[(a+1)*10+b] or stats[a*10+b+1]
+                            if step then consider(v,v.pos,goal,step,goal.path1>=goal.path2) end
+                        end
+                    end
+                end
+                if #z.towers<cap and z.cash>=base.cost then
+                    -- Scan sites by remaining reach; the shortlist includes
+                    -- the end of every route, not just the spawn area.
+                    local options={}
+                    for i,item in ipairs(siteProfiles[idx] or {}) do
+                        if i%16==0 then pause() end
+                        if free(item.pos) then
+                            local v=reachable(base,item.a,0.45)+reachable(stats[52] or base,item.b,3.6)*0.3
+                            if v>0 then options[#options+1]={pos=item.pos,rank=v} end
+                        end
+                    end
+                    table.sort(options,function(a,b) return a.rank>b.rank end)
+                    for i=1,math.min(12,#options) do
+                        local pos=options[i].pos
+                        for _,goal in ipairs({base,stats[21],stats[22],stats[32],stats[42],stats[52],stats[23],stats[24],stats[25]}) do
+                            consider(nil,pos,goal,base,goal.path1>=goal.path2)
+                        end
+                    end
+                end
+                if bestChain then
+                    if bestChain.v then
+                        t,cost=upgrade(bestChain.v,bestChain.step)
+                    else t,cost=install(bestChain.pos,bestChain.upper) end
+                    if t then z.moves[#z.moves+1]={wave=wi,age=age,pos=c.physics.pack(t.pos),path1=t.st.path1,path2=t.st.path2,price=cost,upper=t.upper} end
+                end
+                return
+            end
             local best,affordable
             if opt.allocator==3 then
                 -- A distinct candidate policy: finish a productive chain instead of
@@ -420,6 +488,13 @@ function m.new(c,routes,los,spots)
                         local price=step.cost-v.st.cost
                         local current=power(v.st,v.profile)
                         local long=power(goal,profile(v.pos,goal.range,idx,slice))
+                        if wi>=12 then
+                            for _,q in ipairs(urgent) do
+                                local demand=q.e.hp+(q.e.shield or 0)
+                                current+=math.min(demand,impact(v.st,v.profile,q.e,q.d))/math.max(1,#urgent)
+                                long+=math.min(demand,impact(goal,profile(v.pos,goal.range,idx,slice),q.e,q.d))/math.max(1,#urgent)
+                            end
+                        end
                         local gain=math.max(0,power(step,profile(v.pos,step.range,idx,slice))-current)
                         local remaining=math.max(price,goal.cost-v.st.cost)
                         local level=math.max(v.st.path1,v.st.path2)
@@ -434,7 +509,7 @@ function m.new(c,routes,los,spots)
                     if v.st.path1<2 or v.st.path2<1 then readyCore=false break end
                 end
                 if #z.towers==0 or #z.towers<need and readyCore or not focus then
-                    if z.cash>=base.cost and #z.towers<cap then t,cost=build(false) end
+                    if z.cash>=base.cost and #z.towers<cap then t,cost=build(wi>=12 or threatened) end
                 elseif focus.price<=z.cash then
                     t,cost=upgrade(focus.tower,focus.step)
                 else
@@ -1210,7 +1285,7 @@ function m.new(c,routes,los,spots)
         end
         local function score(v)
             local eligible=v.complete and v.lives>0
-            return v.to*100000+(eligible and 10000000 or 0)-(eligible and objective(v,cfg.StartingLives) or math.max(0,v.loss)*120+(v.remainingHP or 0)*0.5)
+            return v.to*1000000+(eligible and 100000000 or 0)-(eligible and objective(v,cfg.StartingLives) or math.min(v.loss, cfg.StartingLives+math.max(0,v.loss-cfg.StartingLives)*0.12)*120+(v.remainingHP or 0)*2+(v.earlyLoss or 0)*180)
         end
         local function retain(v,p,w,stressTest,checkpoints)
             local key={}
@@ -1300,7 +1375,7 @@ function m.new(c,routes,los,spots)
             local parents=table.clone(pool)
             local diverse={}
             for w=1,maxWave do if stageBest[w] then diverse[#diverse+1]=stageBest[w] end end
-            local stagnating=not best and attempts-improvedAt>=48
+            local stagnating=not best and attempts-improvedAt>=36
             assert(#parents>0,"no evaluated candidates")
             local count=12
             local tested=0
@@ -1405,7 +1480,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v21_investment_chains"
+        plan.model="adaptive_v22_route_coverage_final_capital"
         plan.grenadeModel=plan.policy.grenades and "conservative_estimate" or "disabled"
         plan.duplicatePolicies=duplicatePolicies
         plan.duplicateResults=duplicateResults
