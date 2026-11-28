@@ -32,7 +32,7 @@ end
 
 function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
     local out,ids={},{}
-    local metrics={seen=0,ready=0,manual=0,passive=0,disabled=0,noTarget=0,lowValue=0,names={},budget=false}
+    local metrics={seen=0,ready=0,manual=0,passive=0,disabled=0,noTarget=0,lowValue=0,names={},budget=false,noCurrent=0,outOfRange=0,blockedLOS=0,stealthTarget=0}
     local began=os.clock()
     local enemies,assignments={},{}
     for id,e in pairs(s.enemies) do
@@ -116,7 +116,14 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
             local function canTarget(v)
                 return v and (not v.e.stealth or t.stealthDetection) and (v.p-origin).Magnitude<=t.range and los(origin,v.p)
             end
-            if not canTarget(current) then metrics.noTarget+=1 continue end
+            local currentValid=canTarget(current)
+            if not currentValid then
+                metrics.noTarget+=1
+                if not current then metrics.noCurrent+=1
+                elseif current.e.stealth and not t.stealthDetection then metrics.stealthTarget+=1
+                elseif (current.p-origin).Magnitude>t.range then metrics.outOfRange+=1
+                else metrics.blockedLOS+=1 end
+            end
             local choices,scores={},{}
             for _,v in pairs(enemies) do
                 if canTarget(v) then
@@ -160,15 +167,16 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
                 if robust<=0 then return nil end
                 return {kind="ability",id=id,name=name,target=v.e.id,score=robust+4*finishGain,flight=flight,fixedValue=fixed,trackedValue=tracked,incrementalDamage=robust,hitCount=count,finishGain=finishGain,hits=hits,reason="marginal_grenade"}
             end
-            local best=evaluate(current,0)
-            local checked={[current.e.id]=true}
+            local best=currentValid and evaluate(current,0) or nil
+            local checked={}
+            if currentValid then checked[current.e.id]=true end
             if not focus then
                 for i,v in pairs(choices) do
                     if not checked[v.e.id] and i-1~=t.query then
                         checked[v.e.id]=true
                         local q=evaluate(v,0.35*math.max(1,s.speed or 1))
                         if q then
-                            local cost=ordinary(t,current.e,0.35*math.max(1,s.speed or 1))
+                            local cost=currentValid and ordinary(t,current.e,0.35*math.max(1,s.speed or 1)) or 0
                             q.score=math.max(0,q.score-cost)
                             if q.score>math.max(8,best and best.score*1.25 or 0) then
                                 q.kind="target" q.query=i-1 q.priorQuery=t.query q.reason="grenade_retarget" q.abilityName=name
@@ -179,7 +187,7 @@ function m.rank(s,physics,los,routes,limit,offset,reserved,focus)
                 end
             end
             if best then
-                local later=evaluate(current,0.75)
+                local later=currentValid and evaluate(current,0.75) or nil
                 -- Waiting for a group is worthwhile only when it clearly beats firing now.
                 if later and best.kind=="ability" and later.score>best.score*1.35+10 then metrics.lowValue+=1
                 else out[#out+1]=best end

@@ -1,4 +1,4 @@
-local m={version="adaptive-v22"}
+local m={version="adaptive-v23"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -1322,23 +1322,35 @@ function m.new(c,routes,los,spots)
             if reason=="victory" then
                 local ok=true
                 local worst=v.lives
+                local robustEarly=v.earlyLoss or 0
+                local robustTime=v.time
+                local robust
+                local checkPolicy=table.clone(policy)
+                -- Ability use is not guaranteed in a real match. A winning plan
+                -- must also survive using only ordinary attacks and modeled M203.
+                checkPolicy.grenades=false
                 local checks={}
                 for k in pairs(routes) do
-                    local test=simulate(s,k,policy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end,nil,false,v.skips)
+                    local test=simulate(s,k,checkPolicy,false,v.moves,function(w,z) report(i,n,w,z,"route check "..phase) end,nil,false,v.skips)
                     if not test then return false end
                     checks[#checks+1]={route=k,complete=test.complete,lives=test.lives,earlyLoss=test.earlyLoss,remaining=test.remaining,replayed=test.replayed}
                     worst=math.min(worst,test.lives)
+                    robustEarly=math.max(robustEarly,test.earlyLoss or 0)
+                    robustTime=math.max(robustTime,test.time)
+                    if k==idx then robust=test end
                     local why=not test.complete and (test.unknown>0 and "unknown_data" or test.lives<=0 and "defeat" or "enemies_remaining") or math.abs(test.ledgerError)>0.01 and "cash_mismatch" or test.replayed~=#v.moves and "incomplete_replay" or "passed"
                     if s.progress then s.progress(i,n,test.to,test.lives,"route result "..phase,{reason=why,cash=test.cash,earlyLoss=test.earlyLoss,remaining=test.remaining,remainingHP=test.remainingHP,unknown=test.unknown,spent=test.spent,income=test.income,bonuses=test.bonuses,ledgerError=test.ledgerError,blockedMove=test.blockedMove,replayed=test.replayed}) end
                     if why=="passed" then
                         local early=false
                         for wi,at in pairs(v.skips) do if at+1e-6<c.forecast.wave(wi).last then early=true break end end
                         if early then
-                            local alternative=table.clone(policy)
+                            local alternative=table.clone(checkPolicy)
                             alternative.cancelEarly=true
                             local alt=simulate(s,k,alternative,false,v.moves,nil,nil,false,v.skips)
                             if not alt then return false end
                             worst=math.min(worst,alt.lives)
+                            robustEarly=math.max(robustEarly,alt.earlyLoss or 0)
+                            robustTime=math.max(robustTime,alt.time)
                             if not alt.complete or alt.replayed~=#v.moves or math.abs(alt.ledgerError)>0.01 then why="early_skip_uncertain" test=alt end
                         end
                     end
@@ -1353,13 +1365,19 @@ function m.new(c,routes,los,spots)
                     end
                 end
                 if ok then
-                    v.ready=true
-                    v.routeLives=worst
-                    v.checks=checks
+                    local candidate=table.clone(robust or v)
+                    candidate.moves=v.moves
+                    candidate.skips=v.skips
+                    candidate.policy=checkPolicy
+                    candidate.ready=true
+                    candidate.routeLives=worst
+                    candidate.checks=checks
+                    candidate.grenadeIndependent=true
+                    candidate.time=robustTime
                     if not firstWinAt then firstWinAt=os.clock() firstWinAttempt=attempts end
-                    local rank=objective({time=v.time,lives=worst},cfg.StartingLives)+#v.moves*0.001
-                    v.selectionScore=rank
-                    if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then best=v end
+                    local rank=robustTime+(cfg.StartingLives-worst)*2.5+robustEarly*2+#v.moves*0.001
+                    candidate.selectionScore=rank
+                    if not best or rank<best.selectionScore or rank==best.selectionScore and worst>best.routeLives then best=candidate end
                 end
             end
             retain(v,policy,problem,failedStress,checkpoints)
@@ -1480,7 +1498,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v22_route_coverage_final_capital"
+        plan.model="adaptive_v23_grenade_independent_rescue"
         plan.grenadeModel=plan.policy.grenades and "conservative_estimate" or "disabled"
         plan.duplicatePolicies=duplicatePolicies
         plan.duplicateResults=duplicateResults
