@@ -115,7 +115,18 @@ function m.new(c)
         init.towers={}
         init.towerCount=0
         init.cancel=cancel
-        init.progress=progress
+        local previousCPU,previousYields,previousWall=0,0,os.clock()
+        init.progress=function(i,n,w,lives,phase,detail)
+            if detail and detail.attempt then
+                local total=cpu+math.max(0,os.clock()-began)
+                local now=os.clock()
+                detail.attemptCPU=total-previousCPU
+                detail.attemptWall=now-previousWall
+                detail.attemptYields=yields-previousYields
+                previousCPU,previousWall,previousYields=total,now,yields
+            end
+            if progress then progress(i,n,w,lives,phase,detail) end
+        end
         local first,plan=search.search(init)
         if not plan then return end
         plan.preflightPerformance={cpuSeconds=cpu,peakSliceMs=peak*1000,yields=yields,targetSliceMs=2}
