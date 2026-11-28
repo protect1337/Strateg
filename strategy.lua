@@ -1,4 +1,4 @@
-local m={version="adaptive-v17"}
+local m={version="adaptive-v18"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -1235,7 +1235,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v17_natural_clear_replay_skip"
+        plan.model="adaptive_v18_independent_grenade"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts

@@ -14,7 +14,6 @@ function m.new(c)
     local lastSkipKey
     local lastPreparedWave
     local lastHeavy=-math.huge
-    local lastAbility=-math.huge
     local heavyMs=0
     local lastEmergencyKey
     local function workSlice()
@@ -651,8 +650,6 @@ function m.new(c)
                     end
                 elseif result.kind=="spend" and not a and not planned and v.action and valid(v.action,s) then
                     a=v.action queued=v.goal
-                elseif result.kind=="ability" and not a and v.action and c.executor.available(v.action) then
-                    a=v.action
                 end
             end
         end
@@ -671,7 +668,7 @@ function m.new(c)
         local plannedSkip=rollout.skips and rollout.skips[s.wave]
         local plannedDue=plannedSkip and s.waveAge and s.waveAge+3.5*(s.speed or 1)>=plannedSkip
         local preparedDue=plannedDue and lastPreparedWave~=s.wave
-        if preparedDue and job and job.s.wave==s.wave and (job.kind=="ability" or job.kind=="spend" or job.kind=="skip" and job.s.waveAge+3.5*(job.s.speed or 1)<plannedSkip) then job.cancelled=true end
+        if preparedDue and job and job.s.wave==s.wave and (job.kind=="spend" or job.kind=="skip" and job.s.waveAge+3.5*(job.s.speed or 1)<plannedSkip) then job.cancelled=true end
         local skipKey=string.format("%d:%d:%d:%d:%d",s.wave,s.towerCount,levels,math.floor(s.lives/10),math.floor(s.cash/500))
         local skipChanged=preparedDue or plannedDue and s.time-lastSkip>=1.5 or skipKey~=lastSkipKey or s.time-lastSkip>=12
         local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>3.5*(s.speed or 1)+0.3
@@ -741,14 +738,6 @@ function m.new(c)
                     v=spend(s,ts,liveOnly,extra)
                     if v then v.reason="available_power" end
                     return {action=v}
-                end)
-            elseif not a and #ts>0 and s.time-lastAbility>=0.5 then
-                lastAbility=s.time
-                launch("ability",s,function()
-                    for _,v in ipairs(c.ability.rank(s,c.physics,workSlice)) do
-                        if c.executor.available(v) then return {action=v} end
-                    end
-                    return {}
                 end)
             end
         end

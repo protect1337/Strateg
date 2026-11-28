@@ -192,10 +192,17 @@ function m.new()
                 end
                 buffTimes[id]=active
                 for name, a in pairs(t.AbilityHandler.Abilities) do
+                    local cfg=a.Config
+                    local projectile=cfg.ProjectileHitData
                     ab[name] = {
                         cooldown = a:GetCooldownRemaining(),
                         total = a:GetTotalCooldown(),
-                        passive = a.Config.Passive,
+                        passive = cfg.Passive,
+                        custom = cfg.CustomTriggered,
+                        manual = cfg.IsManualAimAtGround or cfg.IsManualAimAtPath or cfg.ManualAimInfiniteRange,
+                        aimRange = cfg.CustomQueryData and cfg.CustomQueryData.Range,
+                        radius = projectile and projectile.SplashRadius or cfg.EffectRadius,
+                        damage = projectile and projectile.Damage or cfg.Damage,
                         disabled = a:GetDisabled()
                     }
                 end

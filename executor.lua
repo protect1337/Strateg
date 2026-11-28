@@ -118,7 +118,7 @@ function m.new(common, reader, ctx, log)
                 confirmed = ab and (ab.cooldown or 0) > pending.cooldown
             end
             if confirmed then
-                report(a, "confirmed")
+                report(a, a.kind=="ability" and "observed" or "confirmed", a.kind=="ability" and "client_cooldown_changed" or nil)
                 pending = nil
             elseif os.clock() >= pending.deadline then
                 report(a, "failed", "confirmation_timeout")
@@ -187,11 +187,15 @@ function m.new(common, reader, ctx, log)
                 sell:FireServer(t.Hash)
                 return true
             elseif a.kind == "ability" then
-                if not t or not t.CurrentTarget then return false, "target_missing" end
-                local ab = t.AbilityHandler:GetAbility(a.name)
-                if not ab or ab.Passive or not ab:CanUse() or not ab:CanAfford() then return false, "ability_unavailable" end
-                p.cooldown = ab:GetCooldownRemaining()
-                return not not ab:Use(), "ability_rejected"
+                if not t or not s.enemies[a.target] then return false, "target_missing" end
+                local ab = t.AbilityHandler.Abilities[a.name]
+                local cfg=ab and ab.Config
+                if not cfg or cfg.Passive or cfg.CustomTriggered or cfg.IsManualAimAtGround or cfg.IsManualAimAtPath or cfg.ManualAimInfiniteRange then return false,"ability_not_automatic" end
+                if not ab:CanUse() or type(ab.CanAfford)=="function" and not ab:CanAfford() then return false,"ability_unavailable" end
+                p.cooldown=ab:GetCooldownRemaining()
+                if p.cooldown>0 then return false,"ability_cooldown" end
+                local used=ab:Use()
+                return used~=false,"ability_rejected"
             elseif a.kind == "skip" then
                 if not x.canSkip(s) or a.wave ~= s.wave then return false, "vote_unavailable" end
                 local threat = 0
@@ -208,7 +212,7 @@ function m.new(common, reader, ctx, log)
             report(a, "failed", tostring(ok and reason or accepted))
             return false
         end
-        p.deadline = os.clock() + (a.kind=="upgrade" and 1.5 or 5)
+        p.deadline = os.clock() + (a.kind=="ability" and 1.0 or a.kind=="upgrade" and 1.5 or 5)
         if a.kind=="skip" then pendingSkip=p else pending=p end
         report(a, "sent")
         return true
