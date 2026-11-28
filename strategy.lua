@@ -1,4 +1,4 @@
-local m={version="adaptive-v18"}
+local m={version="adaptive-v19"}
 
 function m.new(c,routes,los,spots)
     local x={}
@@ -893,7 +893,7 @@ function m.new(c,routes,los,spots)
         local wi=s.wave
         local at=s.waveAge+3.5*(s.speed or 1)
         local target=rollout.skips[wi]
-        if not target or wi>=maxWave-1 or at+0.1<target or at>=s.waveAge+s.timerRemaining-0.1 then return nil,"outside_window" end
+        if wi>=maxWave-1 or at>=s.waveAge+s.timerRemaining-0.5 then return nil,"outside_window" end
         if at<c.forecast.wave(wi).last or (rollout.skips[wi+1] and rollout.skips[wi+1]<c.forecast.wave(wi+1).last) then return nil,"early_spawn_uncertainty" end
         if wi>1 and rollout.skips[wi-1] and rollout.skips[wi-1]<c.forecast.wave(wi-1).last then return nil,"prior_spawns" end
         local endWave=math.min(maxWave-1,wi+3)
@@ -918,8 +918,15 @@ function m.new(c,routes,los,spots)
         local started=os.clock()
         simState.cancel=function() return os.clock()-started>math.min(2.5,math.max(0.5,s.timerRemaining/math.max(1,s.speed or 1)-3.5)) end
         local worst=math.huge
+        local saved=math.huge
         local checkpointWave=wi+1
         for idx in pairs(routes) do
+            local natural=simulate(simState,idx,rollout.policy,false,{},nil,nil,false,{}, {wave=wi,age=s.waveAge,delay=s.timerRemaining,freezePurchases=true,endWave=wi,history=rollout.history})
+            if not natural then return nil,"short_budget" end
+            if natural.unknown>0 or natural.loss>0.01 then return nil,"natural_branch_risk" end
+            local gain=natural.time-(at-s.waveAge)
+            if gain<=0.8 then return nil,"natural_clear_first" end
+            saved=math.min(saved,gain)
             local matched,why
             local function accept(w,cp,replayed)
                 if w<=wi or replayed~=required[w] then why="purchase" return false end
@@ -939,7 +946,6 @@ function m.new(c,routes,los,spots)
         end
         local threat=0
         for _,e in pairs(s.enemies or {}) do threat+=e.hp+(e.shield or 0) end
-        local saved=math.max(0,s.timerRemaining-3.5*(s.speed or 1))
         return {allowed=true,prepared=true,reason="prepared_checkpoint_skip",tested=1,predictedLoss=0,checkpointWave=checkpointWave,checkpointHP=worst,threat=threat,lives=s.lives,delay=s.timerRemaining,saved=saved,savedReal=saved/math.max(0.01,s.speed or 1)}
     end
     function x.compareSkips(s,rollout,cursor)
@@ -947,7 +953,7 @@ function m.new(c,routes,los,spots)
         local quick,why=x.preparedSkip(s,rollout,cursor)
         if quick then return quick end
         if why=="natural_clear_first" then return {allowed=false,reason=why,preparedReason=why,tested=1} end
-        if not s.waveAge or not s.timerRemaining or s.timerRemaining<1.5 or s.wave>=maxWave then return {allowed=false,reason="no_window"} end
+        if not s.waveAge or not s.timerRemaining or s.timerRemaining<=3.5*(s.speed or 1)+0.5 or s.wave>=maxWave then return {allowed=false,reason="no_window"} end
         local wi=s.wave
         local age=s.waveAge
         local delay=s.timerRemaining
@@ -976,7 +982,7 @@ function m.new(c,routes,los,spots)
         local first=age+3.5*(s.speed or 1)
         if first>=age+delay-0.1 then return {allowed=false,reason="no_window",preparedReason=why} end
         local planned=rollout.skips and rollout.skips[wi]
-        local canReplay=planned and first+0.1>=planned and first>=c.forecast.wave(wi).last
+        local canReplay=first>=c.forecast.wave(wi).last+0.25
         if canReplay then
             for w=wi+1,maxWave-1 do
                 if rollout.skips[w] and rollout.skips[w]<c.forecast.wave(w).last then canReplay=false break end
@@ -1235,7 +1241,7 @@ function m.new(c,routes,los,spots)
             if not v or not v.complete or v.replayed~=#plan.moves then prepared=nil break end
             prepared.routes[idx]=cps
         end
-        plan.model="adaptive_v18_independent_grenade"
+        plan.model="adaptive_v19_marginal_grenade_earlier_skip"
         plan.computeTime=os.clock()-began
         plan.realTime=plan.time/1.5
         plan.attempts=attempts

@@ -129,13 +129,14 @@ function m.new(common, reader, ctx, log)
     end
 
     function x.skipConfirmed(wi) return confirmedSkipWave==wi end
+    function x.queryBusy(id) return queryPending[id]~=nil end
 
     function x.canSkip(s)
         return canVote and not pendingSkip and votedWave ~= s.wave
     end
 
     function x.target(a,s)
-        if not allowed(s) or s.wave<12 or not a or queryPending[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<2 then return false end
+        if not allowed(s) or not a or (s.wave<12 and a.reason~="grenade_retarget" and a.reason~="grenade_restore") or queryPending[a.id] or os.clock()-(queryTime[a.id] or -math.huge)<(a.reason=="grenade_restore" and 0.3 or 2) then return false end
         local t=tower(a.id)
         if not t or t.CustomQueryOptions or type(a.query)~="number" or a.query%1~=0 or a.query<0 or a.query>3 or t.QueryTypeIndex==a.query then return false end
         local ok=pcall(function()
@@ -187,7 +188,10 @@ function m.new(common, reader, ctx, log)
                 sell:FireServer(t.Hash)
                 return true
             elseif a.kind == "ability" then
-                if not t or not s.enemies[a.target] then return false, "target_missing" end
+                if not t or queryPending[a.id] or not t.CurrentTarget or tostring(t.CurrentTarget.UniqueId)~=a.target or not s.enemies[a.target] then return false, "target_changed_before_grenade" end
+                local target=s.enemies[a.target]
+                local origin=ctx.physics.vec(s.towers[a.id].pos)
+                if (ctx.physics.vec(target.pos or target.pathPos)-origin).Magnitude>t:GetCurrentRange() then return false,"target_out_of_range" end
                 local ab = t.AbilityHandler.Abilities[a.name]
                 local cfg=ab and ab.Config
                 if not cfg or cfg.Passive or cfg.CustomTriggered or cfg.IsManualAimAtGround or cfg.IsManualAimAtPath or cfg.ManualAimInfiniteRange then return false,"ability_not_automatic" end

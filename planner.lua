@@ -559,6 +559,11 @@ function m.new(c)
         if job then job.cancelled=true end
         finished=nil
     end
+    function x.grenades(s,offset,reserved,focus)
+        if not routes or not los then return {},offset,{} end
+        return c.ability.rank(s,c.physics,los,routes,4,offset,reserved,focus)
+    end
+
     function x.plan(s)
         if not s.running or s.difficulty~="Easy" or s.playerCount~=1 or not s.wave then return end
         if s.time-last<0.08 then return end
@@ -629,7 +634,7 @@ function m.new(c)
                     elseif not a and v.targets then targets=v.targets end
                 elseif result.kind=="skip" then
                     skip=v
-                    if skip.allowed and (skip.plan or skip.prepared) and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>1 then
+                    if skip.allowed and (skip.plan or skip.prepared) and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>3.5*(s.speed or 1)+0.5 then
                         local hp=0
                         for _,e in pairs(s.enemies) do hp+=e.hp+(e.shield or 0) end
                         if hp<=skip.threat+math.max(8,skip.threat*0.05) and s.lives>=skip.lives then
@@ -670,10 +675,11 @@ function m.new(c)
         local preparedDue=plannedDue and lastPreparedWave~=s.wave
         if preparedDue and job and job.s.wave==s.wave and (job.kind=="spend" or job.kind=="skip" and job.s.waveAge+3.5*(job.s.speed or 1)<plannedSkip) then job.cancelled=true end
         local skipKey=string.format("%d:%d:%d:%d:%d",s.wave,s.towerCount,levels,math.floor(s.lives/10),math.floor(s.cash/500))
-        local skipChanged=preparedDue or plannedDue and s.time-lastSkip>=1.5 or skipKey~=lastSkipKey or s.time-lastSkip>=12
-        local dueSkip=s.wave>=1 and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>3.5*(s.speed or 1)+0.3
-            and (next(s.enemies)~=nil or s.waveAge<w.last)
-            and (not plannedSkip or plannedDue)
+        local skipChanged=preparedDue or skipKey~=lastSkipKey or s.time-lastSkip>=2
+        -- A prepared time is a candidate, not a prohibition on earlier votes.
+        local dueSkip=s.wave>=1 and s.wave<#c.economy.config.Waves and w and s.waveAge and c.executor.canSkip(s) and s.timerRemaining and s.timerRemaining>3.5*(s.speed or 1)+1
+            and s.waveAge+3.5*(s.speed or 1)>=w.last+0.25
+            and next(s.enemies)~=nil
         if not job and not skip.allowed and not errorMessage then
             if final and not finalGoal and #ts>0 and s.cash>=base.cost and s.time-lastFinalSpend>=0.5 then
                 lastFinalSpend=s.time
@@ -707,7 +713,7 @@ function m.new(c)
                     end
                     return {action=action,baseline=b,goal=goal,sold=sold,targets=targetActions}
                 end)
-            elseif dueSkip and not queued and skipChanged and (preparedDue or s.time-lastSkip>=(plannedDue and 1.5 or 5)) and (not a or plannedDue) then
+            elseif dueSkip and not queued and skipChanged and (preparedDue or s.time-lastSkip>=1.5) and (not a or plannedDue) then
                 lastSkip=s.time lastSkipKey=skipKey
                 if plannedDue then lastPreparedWave=s.wave end
                 local snap=table.clone(s)
@@ -746,7 +752,7 @@ function m.new(c)
         if final and s.time-lastSale>=0.25 then
             local sales=c.tactics.safeSales(s,routes,all,16)
             for _,sale in ipairs(sales) do
-                if valid(sale,s) and (not a or a.id~=sale.id) and (not finalGoal or finalGoal.id~=sale.id) then
+                if not a and valid(sale,s) and (not finalGoal or finalGoal.id~=sale.id) then
                     a=sale
                     lastSale=s.time
                     break
