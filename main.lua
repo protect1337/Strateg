@@ -1,6 +1,6 @@
 local rs = game:GetService("RunService")
 local rep = game:GetService("ReplicatedStorage")
-local base = "https://raw.githubusercontent.com/protect1337/Strateg/ddf7282d68a9ef21d888f7eb47d2941a26f14e49/"
+local base = "https://raw.githubusercontent.com/protect1337/Strateg/18ed19ce6f2b662e1c618f96852117d2084dd302/"
 
 local function load(name)
     local src = game:HttpGet(base .. name .. ".lua")
@@ -29,8 +29,8 @@ local ok, err = xpcall(function()
     ctx.combat.configure(ctx.ability,ctx.resources)
     ctx.forecast = load("forecast").new(ctx)
     ctx.strategy = load("strategy")
-    assert(ctx.strategy.version=="adaptive-v29","strategy version mismatch: "..tostring(ctx.strategy.version))
-    print("[Strateg] adaptive-v29 | dense placement | timed target competition | verified skip")
+    assert(ctx.strategy.version=="adaptive-v30","strategy version mismatch: "..tostring(ctx.strategy.version))
+    print("[Strateg] adaptive-v30 | frame-budgeted search | shortlisted target evaluation | verified skip")
     ctx.tactics = load("tactics").new(ctx)
     log.record("forecast", {event = "catalog", waves = ctx.forecast.catalog()})
     local executor = load("executor").new(common, reader, ctx, log)
@@ -187,6 +187,8 @@ local ok, err = xpcall(function()
                             local now = state.get()
                             if plan and now and now.voting and now.map == snap.map and now.playerCount == 1 then
                                 log.record("forecast",{event="preflight",map=snap.map,rollout=plan})
+                                local perf=plan.preflightPerformance
+                                if perf then print(string.format("[Strateg] preflight CPU %.2fs | peak slice %.2fms | yields %d",perf.cpuSeconds,perf.peakSliceMs,perf.yields)) end
                                 if not plan.ready or plan.to~=#ctx.economy.config.Waves then
                                     retryScanAt=os.clock()+0.5
                                     print(string.format("[Strateg] retrying | reached %d/18 | HP %.1f",plan.to,plan.lives or 0))
