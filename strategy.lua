@@ -359,7 +359,7 @@ function m.new(c,routes,los,spots,initSlice)
             if wi>0 and z.time<(z.portfolioAt or 0) then return end
             -- No need to rebuild the whole portfolio when neither cash nor a
             -- scheduled target check can produce an action.
-            if wi>0 and z.cash<base.cost and z.time<(z.nextQuerySearch or 0) then return end
+            if wi>0 and z.cash<165 and (opt.querySearch==false or z.time<(z.nextQuerySearch or 0)) then return end
             z.portfolioAt=z.time+1.35
             local horizon=opt.capitalHorizon or 30
             local final=wi==maxWave
@@ -477,31 +477,32 @@ function m.new(c,routes,los,spots,initSlice)
                 return result
             end
             local urgent={}
+            local byType={}
             danger=0
             for _,e in ipairs(z.enemies) do
                 if not e.dead and not e.air then
                     pause()
                     local demand=e.hp+(e.shield or 0)+(e.extra or 0)
                     local eta=math.max(0.1,(r.length-e.dist)/math.max(0.1,e.speed or 1))
-                    local capacity=0
-                    for _,v in ipairs(z.towers) do
-                        local a,b=impact(v.st,v.profile,e,0)
-                        capacity+=(a or 0)+(b or 0)
-                    end
-                    local covered=capacity
                     local weight=1+2*math.max(0,1-eta/30)
-                    local deficit=math.max(0,demand-covered)
-                    danger=math.max(danger,deficit/math.max(1,demand)*weight)
-                    urgent[#urgent+1]={e=e,demand=demand,covered=covered,weight=weight,eta=eta,deficit=deficit}
+                    local q={e=e,demand=demand,covered=0,weight=weight,eta=eta,deficit=demand,rank=demand*weight/math.sqrt(eta)}
+                    urgent[#urgent+1]=q
+                    local key=tostring(e.type)
+                    if not byType[key] or q.rank>byType[key].rank then byType[key]=q end
                 end
             end
-            table.sort(urgent,function(a,b)
-                local av=a.deficit*a.weight+0.02*a.demand
-                local bv=b.deficit*b.weight+0.02*b.demand
-                if av~=bv then return av>bv end
-                return a.eta<b.eta
-            end)
-            while #urgent>12 do table.remove(urgent) end
+            local function order(a,b) if a.rank~=b.rank then return a.rank>b.rank end return a.e.id<b.e.id end
+            table.sort(urgent,order)
+            local picked,selected={},{}
+            local types={}
+            for _,q in pairs(byType) do types[#types+1]=q end
+            table.sort(types,order)
+            for i=1,math.min(6,#types) do picked[#picked+1]=types[i] selected[types[i].e.id]=true end
+            for _,q in ipairs(urgent) do
+                if #picked>=12 then break end
+                if not selected[q.e.id] then picked[#picked+1]=q selected[q.e.id]=true end
+            end
+            urgent=picked
             -- Refine only the most relevant live threats; the complete combat
             -- loop still processes every enemy and every shot.
             danger=0
@@ -628,7 +629,7 @@ function m.new(c,routes,los,spots,initSlice)
             local function consider(v,pos,step,goal,slotPrice)
                 local old=v and v.st
                 local price=step.cost-(old and old.cost or 0)
-                if price>z.cash and z.cash<base.cost then return end
+                if price>z.cash and z.cash<165 then return end
                 local cost=goal.cost-(old and old.cost or 0)
                 if price<=0 or cost<price then return end
                 local wait=funding(cost)
@@ -651,15 +652,15 @@ function m.new(c,routes,los,spots,initSlice)
                 pause()
                 local a,b=v.st.path1,v.st.path2
                 local one,two=stats[(a+1)*10+b],stats[a*10+b+1]
+                local mode=v.pendingQuery or v.query or 0
+                local rank1=one and gain(v.st,v.profile,one,profile(v.pos,one.range,idx,slice),0.45,mode,mode,true)/math.max(1,one.cost-v.st.cost) or -math.huge
+                local rank2=two and gain(v.st,v.profile,two,profile(v.pos,two.range,idx,slice),0.45,mode,mode,true)/math.max(1,two.cost-v.st.cost) or -math.huge
                 for _,goal in ipairs(goals) do
                     if goal.cost>v.st.cost and goal.path1>=a and goal.path2>=b then
                         local step1=goal.path1>a and one or nil
                         local step2=goal.path2>b and two or nil
                         local step=step1 or step2
                         if step1 and step2 then
-                            local mode=v.pendingQuery or v.query or 0
-                            local rank1=gain(v.st,v.profile,step1,profile(v.pos,step1.range,idx,slice),0.45,mode,mode,true)/math.max(1,step1.cost-v.st.cost)
-                            local rank2=gain(v.st,v.profile,step2,profile(v.pos,step2.range,idx,slice),0.45,mode,mode,true)/math.max(1,step2.cost-v.st.cost)
                             if rank2>rank1 then step=step2 end
                         end
                         if step then consider(v,v.pos,step,goal) end
